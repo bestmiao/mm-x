@@ -141,6 +141,44 @@ func pumpConnToConn(src, dst net.Conn, lim *Limiter) {
 	}
 }
 
+// RelayConnsCounted 是 RelayConns 的服务端版：双向转发的同时记流量。
+// a 是客户端一侧（yamux 流），b 是目标一侧：a→b 是入站
+// （客户端→服务端→目标），b→a 是出站（目标→服务端→客户端）。
+// 只统计真实转发出去的字节（写成功后才记），握手和流头不算。
+// 超限后 tc.Wait 会把流量压到 TC 限速值（阻断模式/不限额时直接返回，
+// 不影响正常流量）。tc 为 nil 时就是普通中继，不计数不限速。
+func RelayConnsCounted(a, b net.Conn, lim *Limiter, tc *TrafficCounter) {
+	done := make(chan struct{}, 2)
+	go func() { pumpConnToConnCounted(a, b, lim, tc, false); done <- struct{}{} }()
+	go func() { pumpConnToConnCounted(b, a, lim, tc, true); done <- struct{}{} }()
+	<-done
+	a.Close()
+	b.Close()
+	<-done
+}
+
+func pumpConnToConnCounted(src, dst net.Conn, lim *Limiter, tc *TrafficCounter, outbound bool) {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			lim.Wait(n)
+			tc.Wait(n)
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return
+			}
+			if outbound {
+				tc.AddOut(int64(n))
+			} else {
+				tc.AddIn(int64(n))
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // UDP 数据报帧（流内）：2 字节长度 + 数据报
 // ---------------------------------------------------------------------------
@@ -239,7 +277,10 @@ const SessionIdleTimeout = 10 * time.Minute
 // 空闲的定义：idleTimeout 内没开新流、且没有流在跑。
 // 接受流的 goroutine 整个会话只有一个（done 关掉时它才退出），
 // 不会每轮都起一个——否则有流在跑时每次超时都会漏一个 goroutine。
-func ServeMuxSession(mc *Conn, serverRate, serverBurst int64, remote string, allowPrivate bool, idleTimeout time.Duration) error {
+// tc 是流量计数器（可为 nil）：流里转发的字节都记进去，
+// 阻断模式超限后新开的流直接关掉（会话建立之前就超限的连接
+// 由调用方在握手后挡掉，这里是第二道防线）。
+func ServeMuxSession(mc *Conn, serverRate, serverBurst int64, remote string, allowPrivate bool, idleTimeout time.Duration, tc *TrafficCounter) error {
 	ys, err := yamux.Server(NewFrameConn(mc), YamuxConfig())
 	if err != nil {
 		return fmt.Errorf("建立复用会话失败：%v", err)
@@ -286,7 +327,7 @@ func ServeMuxSession(mc *Conn, serverRate, serverBurst int64, remote string, all
 				return nil // 会话断了（对端关了 / 底层连接断了），正常结束
 			}
 			sess.addStream()
-			go ServeMuxStream(r.st, sess, serverRate, serverBurst, remote, allowPrivate)
+			go ServeMuxStream(r.st, sess, serverRate, serverBurst, remote, allowPrivate, tc)
 			resetTimer()
 		case <-timerCh:
 			if sess.ActiveStreams() > 0 {
@@ -300,25 +341,31 @@ func ServeMuxSession(mc *Conn, serverRate, serverBurst int64, remote string, all
 }
 
 // ServeMuxStream 处理复用会话里新开的一条流：读流头，按种类分流。
-func ServeMuxStream(stream net.Conn, sess *ServerSession, serverRate, serverBurst int64, remote string, allowPrivate bool) {
+// 阻断模式下流量已超限时直接关流（会话是超限前建好的，
+// 新流不能再用；已有流由服务端的流量监视 goroutine 断开）。
+func ServeMuxStream(stream net.Conn, sess *ServerSession, serverRate, serverBurst int64, remote string, allowPrivate bool, tc *TrafficCounter) {
 	defer sess.removeStream()
 	kind, target, rate, burst, err := DecodeStreamHeader(stream)
 	if err != nil {
 		stream.Close()
 		return
 	}
+	if tc.Blocked() {
+		stream.Close()
+		return
+	}
 	lim := sess.limiter(rate, burst, serverRate, serverBurst)
 	switch kind {
 	case StreamKindTCP:
-		serveMuxTCP(stream, target, lim, remote, allowPrivate)
+		serveMuxTCP(stream, target, lim, remote, allowPrivate, tc)
 	case StreamKindUDP:
-		serveMuxUDP(stream, target, lim, remote, allowPrivate)
+		serveMuxUDP(stream, target, lim, remote, allowPrivate, tc)
 	default:
 		stream.Close()
 	}
 }
 
-func serveMuxTCP(stream net.Conn, target string, lim *Limiter, remote string, allowPrivate bool) {
+func serveMuxTCP(stream net.Conn, target string, lim *Limiter, remote string, allowPrivate bool, tc *TrafficCounter) {
 	targetConn, err := DialTarget("tcp", target, 10*time.Second, allowPrivate)
 	if err != nil {
 		// 目标地址不记进日志（A6）：服务端日志只留错误码，
@@ -334,7 +381,7 @@ func serveMuxTCP(stream net.Conn, target string, lim *Limiter, remote string, al
 		stream.Close()
 		return
 	}
-	RelayConns(stream, targetConn, lim)
+	RelayConnsCounted(stream, targetConn, lim, tc)
 }
 
 // udpFlowIdleTimeout：一条 UDP 流多久没数据报就关掉（避免流泄漏）。
@@ -342,7 +389,7 @@ func serveMuxTCP(stream net.Conn, target string, lim *Limiter, remote string, al
 // 客户端的 UDP 关联断开时也会主动关流。
 const udpFlowIdleTimeout = 120 * time.Second
 
-func serveMuxUDP(stream net.Conn, target string, lim *Limiter, remote string, allowPrivate bool) {
+func serveMuxUDP(stream net.Conn, target string, lim *Limiter, remote string, allowPrivate bool, tc *TrafficCounter) {
 	udpConn, err := DialTarget("udp", target, 10*time.Second, allowPrivate)
 	if err != nil {
 		// 目标地址不记进日志（A6，理由同 serveMuxTCP）。
@@ -359,7 +406,7 @@ func serveMuxUDP(stream net.Conn, target string, lim *Limiter, remote string, al
 	defer udpConn.Close()
 	defer stream.Close()
 	done := make(chan struct{}, 2)
-	// 流 → UDP：读长度前缀数据报，发给目标
+	// 流 → UDP：读长度前缀数据报，发给目标（入站）
 	go func() {
 		defer func() { done <- struct{}{} }()
 		for {
@@ -369,13 +416,15 @@ func serveMuxUDP(stream net.Conn, target string, lim *Limiter, remote string, al
 				return
 			}
 			lim.Wait(len(dg))
+			tc.Wait(len(dg))
 			_ = udpConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if _, err := udpConn.Write(dg); err != nil {
 				return
 			}
+			tc.AddIn(int64(len(dg)))
 		}
 	}()
-	// UDP → 流：读目标回来的数据报，写长度前缀进流
+	// UDP → 流：读目标回来的数据报，写长度前缀进流（出站）
 	go func() {
 		defer func() { done <- struct{}{} }()
 		buf := make([]byte, maxDatagramSize)
@@ -389,10 +438,12 @@ func serveMuxUDP(stream net.Conn, target string, lim *Limiter, remote string, al
 				continue
 			}
 			lim.Wait(n)
+			tc.Wait(n)
 			_ = stream.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := WriteDatagram(stream, buf[:n]); err != nil {
 				return
 			}
+			tc.AddOut(int64(n))
 		}
 	}()
 	<-done

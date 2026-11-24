@@ -69,7 +69,7 @@ func TestSessionIdleTimeoutClosesIdleSession(t *testing.T) {
 	defer cConn.Close()
 	done := make(chan error, 1)
 	go func() {
-		done <- ServeMuxSession(sConn, 0, BurstUnset, "test", true, 300*time.Millisecond)
+		done <- ServeMuxSession(sConn, 0, BurstUnset, "test", true, 300*time.Millisecond, nil)
 	}()
 	select {
 	case err := <-done:
@@ -95,7 +95,7 @@ func TestSessionIdleTimeoutKeepsBusySession(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- ServeMuxSession(sConn, 0, BurstUnset, "test", true, 300*time.Millisecond)
+		done <- ServeMuxSession(sConn, 0, BurstUnset, "test", true, 300*time.Millisecond, nil)
 	}()
 	// 开一条流并一直占着：回显服务会一直等数据，流不结束。
 	st, err := cli.OpenStream()

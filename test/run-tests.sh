@@ -20,13 +20,14 @@ BSRV2_PID=; BCLI2_PID=; RSRV2_PID=; RCLI3_PID=; RCLI4_PID=
 B14_SRV=; B14_CLI=; B14_SRV0=; B14_CLI0=; B14_SRV3=; B14_CLI3=
 SSRF_SRV_PID=
 S9_SRV=; S15_SRV=; S15_CLI=; T17_SRV=; T17_CLI=; T19_CLI=; T20_CLI=; T20B_CLI=; T21_SRV=; T21_CLI=; T21_SOCKS=; T22_CLI=; T23_SRV=; T23_CLI=; T24_CLI=
+T25_SRV=; T25_CLI=; T25B_SRV=; T25B_CLI=; T25C_SRV=; T25C_CLI=
 ok()   { echo "[PASS] $1"; pass=$((pass+1)); }
 bad()  { echo "[FAIL] $1"; fail=$((fail+1)); }
 skipped() { echo "[SKIP] $1"; skip=$((skip+1)); }
 note() { echo "--- $1"; }
 
 cleanup() {
-  kill $HTTP_PID $SRV_PID $CLI_PID $CLI2_PID $RSRV_PID $RCLI_PID $RCLI2_PID $BSRV_PID $BCLI_PID $BSRV2_PID $BCLI2_PID $RSRV2_PID $RCLI3_PID $RCLI4_PID $B14_SRV $B14_CLI $B14_SRV0 $B14_CLI0 $B14_SRV3 $B14_CLI3 $S9_SRV $S15_SRV $S15_CLI $T17_SRV $T17_CLI $T19_CLI $T20_CLI $T20B_CLI $T21_SRV $T21_CLI $T21_SOCKS $T22_CLI $T23_SRV $T23_CLI $T24_CLI $SSRF_SRV_PID 2>/dev/null
+  kill $HTTP_PID $SRV_PID $CLI_PID $CLI2_PID $RSRV_PID $RCLI_PID $RCLI2_PID $BSRV_PID $BCLI_PID $BSRV2_PID $BCLI2_PID $RSRV2_PID $RCLI3_PID $RCLI4_PID $B14_SRV $B14_CLI $B14_SRV0 $B14_CLI0 $B14_SRV3 $B14_CLI3 $S9_SRV $S15_SRV $S15_CLI $T17_SRV $T17_CLI $T19_CLI $T20_CLI $T20B_CLI $T21_SRV $T21_CLI $T21_SOCKS $T22_CLI $T23_SRV $T23_CLI $T24_CLI $T25_SRV $T25_CLI $T25B_SRV $T25B_CLI $T25C_SRV $T25C_CLI $SSRF_SRV_PID 2>/dev/null
   # 注意：不要在这里 wait——本脚本的输出经过 tee，wait 会等 tee，
   # 而 tee 在等脚本退出，造成死锁。
 }
@@ -844,6 +845,82 @@ env -u no_proxy -u NO_PROXY curl -s --max-time 8 --socks5 127.0.0.1:18137 "http:
 if [ "$?" != 0 ] && grep -q "\[目标拒绝\]" test/client-t24.log; then ok "v4 目标拒绝时客户端日志带 [目标拒绝]（错误码仍生效）";
 else bad "v4 错误码异常（见 client-t24.log）"; fi
 kill $T24_CLI 2>/dev/null; T24_CLI=
+
+note "测试25：流量统计与限额——计数、阻断、TC 限速、参数校验"
+# 25a：不限额（quota=0）时只统计不限制：传 1MB，计数文件里出站应 ≈1MB、
+# 入站只有请求头那点（<10KB）；--traffic-status 显示已用 1.00 MB。
+rm -f test/traffic-25.json
+./mmx-server --listen 127.0.0.1:18150 --psk "$PSK_HEX" --block-fails 100 --traffic-file test/traffic-25.json --traffic-quota 0 --name "流量计数" --allow-private > test/server-t25.log 2>&1 &
+T25_SRV=$!
+sleep 1
+LINK25=$(./mmx-server --print-link --listen 127.0.0.1:18150 --psk "$PSK_HEX" --block-fails 100 --traffic-file test/traffic-25.json --traffic-quota 0 --name "流量计数" 2>/dev/null)
+./mmx-client --link "$LINK25" --target 127.0.0.1:$HTTP_PORT --listen 127.0.0.1:18151 > test/client-t25.log 2>&1 &
+T25_CLI=$!
+sleep 1
+curl -s --max-time 10 -o test/one1m-via-t25.bin "http://127.0.0.1:18151/one1m.bin"
+SHA_25=$(sha256sum test/one1m-via-t25.bin | awk '{print $1}')
+[ "$SHA_25" = "$SHA_1M" ] && ok "流量测试：1MB 经代理传输，数据完整" || bad "流量测试：1MB 传输数据不对"
+kill $T25_CLI 2>/dev/null; T25_CLI=
+sleep 6 # 等后台 5 秒写盘
+python3 - <<'PYEOF'
+import json, sys
+st = json.load(open('test/traffic-25.json'))
+out, inn = st['out'], st['in']
+print(f"计数文件：出站 {out} 字节，入站 {inn} 字节")
+ok = 1024*1024 <= out < 1024*1024 + 100*1024 and 0 < inn < 10*1024
+sys.exit(0 if ok else 1)
+PYEOF
+[ "$?" = 0 ] && ok "计数正确：出站 ≈1MB（1MB 文件 + 响应头），入站只有请求头（<10KB）" || bad "计数不对（见上文，文件 test/traffic-25.json）"
+./mmx-server --traffic-status --traffic-file test/traffic-25.json --traffic-quota 0 > test/traffic-status-25.txt 2>&1
+grep -q "已用：1.00 MB" test/traffic-status-25.txt && grep -q "不限（只统计，不限制）" test/traffic-status-25.txt && ok "--traffic-status 显示已用 1.00 MB、不限额" || bad "--traffic-status 显示不对（见 test/traffic-status-25.txt）"
+kill $T25_SRV 2>/dev/null; T25_SRV=
+# 25b：阻断模式：限额 1M，传 2MB 超限后新连接应被拒绝，服务端日志有超限记录。
+rm -f test/traffic-25b.json
+./mmx-server --listen 127.0.0.1:18152 --psk "$PSK_HEX" --block-fails 100 --traffic-file test/traffic-25b.json --traffic-quota 1M --traffic-limit-mode block --name "流量阻断" --allow-private > test/server-t25b.log 2>&1 &
+T25B_SRV=$!
+sleep 1
+LINK25B=$(./mmx-server --print-link --listen 127.0.0.1:18152 --psk "$PSK_HEX" --block-fails 100 --traffic-file test/traffic-25b.json --traffic-quota 1M --traffic-limit-mode block --name "流量阻断" 2>/dev/null)
+./mmx-client --link "$LINK25B" --target 127.0.0.1:$HTTP_PORT --listen 127.0.0.1:18153 > test/client-t25b.log 2>&1 &
+T25B_CLI=$!
+sleep 1
+curl -s --max-time 10 -o /dev/null "http://127.0.0.1:18153/one1m.bin"
+curl -s --max-time 10 -o /dev/null "http://127.0.0.1:18153/one1m.bin"
+kill $T25B_CLI 2>/dev/null; T25B_CLI=
+sleep 2 # 等 1 秒监视 goroutine 断开现有连接并记日志
+grep -q "流量超限（阻断模式）" test/server-t25b.log && ok "超限后服务端日志有流量超限（阻断模式）记录" || bad "超限后服务端日志无流量超限记录"
+./mmx-client --link "$LINK25B" --target 127.0.0.1:$HTTP_PORT --listen 127.0.0.1:18153 > test/client-t25b2.log 2>&1 &
+T25B_CLI=$!
+sleep 1
+if curl -s --max-time 5 "http://127.0.0.1:18153/index.html" | grep -q "Hello mm-x"; then bad "阻断模式超限后新连接竟然连通了"; else ok "阻断模式超限后新连接被拒绝"; fi
+kill $T25B_CLI 2>/dev/null; T25B_CLI=
+./mmx-server --traffic-status --traffic-file test/traffic-25b.json --traffic-quota 1M --traffic-limit-mode block > test/traffic-status-25b.txt 2>&1
+grep -q "已超限" test/traffic-status-25b.txt && ok "--traffic-status 显示已超限" || bad "--traffic-status 没显示已超限（见 test/traffic-status-25b.txt）"
+kill $T25B_SRV 2>/dev/null; T25B_SRV=
+# 25c：TC 限速模式：限额 1M，超限后传 1MB 应被压到 1M/s（约 1 秒），数据完整。
+rm -f test/traffic-25c.json
+./mmx-server --listen 127.0.0.1:18154 --psk "$PSK_HEX" --block-fails 100 --traffic-file test/traffic-25c.json --traffic-quota 1M --traffic-limit-mode throttle --traffic-throttle-rate 1M --name "流量限速" --allow-private > test/server-t25c.log 2>&1 &
+T25C_SRV=$!
+sleep 1
+LINK25C=$(./mmx-server --print-link --listen 127.0.0.1:18154 --psk "$PSK_HEX" --block-fails 100 --traffic-file test/traffic-25c.json --traffic-quota 1M --traffic-limit-mode throttle --traffic-throttle-rate 1M --name "流量限速" 2>/dev/null)
+./mmx-client --link "$LINK25C" --target 127.0.0.1:$HTTP_PORT --listen 127.0.0.1:18155 > test/client-t25c.log 2>&1 &
+T25C_CLI=$!
+sleep 1
+curl -s --max-time 10 -o /dev/null "http://127.0.0.1:18155/one1m.bin"
+kill $T25C_CLI 2>/dev/null; T25C_CLI=
+sleep 1
+./mmx-client --link "$LINK25C" --target 127.0.0.1:$HTTP_PORT --listen 127.0.0.1:18155 > test/client-t25c2.log 2>&1 &
+T25C_CLI=$!
+sleep 1
+T25C=$(curl -s --max-time 30 -o test/one1m-via-t25c.bin -w "%{time_total}" "http://127.0.0.1:18155/one1m.bin")
+SHA_25C=$(sha256sum test/one1m-via-t25c.bin | awk '{print $1}')
+echo "TC 限速 1M 下超限后传 1MB 耗时 ${T25C}s"
+if [ "$SHA_25C" = "$SHA_1M" ] && awk "BEGIN{exit !($T25C > 0.7)}"; then ok "TC 限速生效：超限后 1MB 耗时 ${T25C}s（>0.7s，被压到约 1M/s），数据完整"; else bad "TC 限速未生效（耗时 ${T25C}s，SHA 对得上：$([ "$SHA_25C" = "$SHA_1M" ] && echo 是 || echo 否)）"; fi
+kill $T25C_CLI $T25C_SRV 2>/dev/null; T25C_CLI=; T25C_SRV=
+# 25d：非法流量参数启动失败并指明原因。
+./mmx-server --traffic-quota 1X 2>&1 | grep -q "流量值不合法" && ok "限额 1X 启动失败并提示流量值不合法" || bad "限额 1X 没被拒绝"
+./mmx-server --traffic-start-day 32 2>&1 | grep -q "周期起始日不合法" && ok "起始日 32 启动失败并提示周期起始日不合法" || bad "起始日 32 没被拒绝"
+./mmx-server --traffic-mode foo 2>&1 | grep -q "流量统计模式不合法" && ok "统计模式 foo 启动失败并提示模式不合法" || bad "统计模式 foo 没被拒绝"
+./mmx-server --traffic-limit-mode throttle --traffic-throttle-rate 0 2>&1 | grep -q "TC 限速值不合法" && ok "TC 限速模式下限速值 0 启动失败并提示" || bad "TC 限速值 0 没被拒绝"
 
 echo ""
 echo "================ 结果汇总 ================"

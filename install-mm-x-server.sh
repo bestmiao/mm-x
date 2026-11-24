@@ -28,6 +28,7 @@ PORT=""
 RATE="6250K"
 BURST="0"
 NAME="mm-x"
+NAME_SET="0" # --name 传过就置 1，没传时安装会交互问一句（只在终端里问）
 HOST=""
 BIN=""
 FALLBACK="site"
@@ -40,6 +41,14 @@ WHITELIST_IPS=()
 WHITELIST_FILE=""
 ALLOW_IPS=()
 ALLOWLIST_FILE=""
+# 流量统计与限额（全服务总量）：默认不限额（只统计，不限制），
+# 不改变现有行为；想限制时用下面 6 个参数或 mm 菜单第 8 项里的流量设置。
+TRAFFIC_MODE="total"
+TRAFFIC_PERIOD="monthly"
+TRAFFIC_START_DAY="1"
+TRAFFIC_LIMIT_MODE="block"
+TRAFFIC_QUOTA="0"
+TRAFFIC_THROTTLE_RATE="125K"
 
 usage() {
   echo "用法：sudo $0 [--port 端口] [--rate 限速] [--burst 突发] [--name 节点名] [--host 公网IP或域名] [--bin 服务端二进制路径] [--whitelist-ip 中转机IP] [--whitelist-file 白名单文件] [--fallback site|silent] [--tls-domain 域名 --tls-cert 证书 --tls-key 私钥]"
@@ -48,7 +57,8 @@ usage() {
   echo "           被占时本脚本会直接报错停下，先停掉占用的服务（例如 systemctl stop nginx）或换个端口再装"
   echo "  --rate   服务端限速上限，默认 6250K（50 Mbps，约 6.25 MB/s；0 = 不限速）"
   echo "  --burst  服务端突发额度上限，默认 0（严格模式：任何时候都不超过限速；想允许开头冲一把再填，例如 --burst 5M）"
-  echo "  --name   节点名，默认 mm-x"
+  echo "  --name   节点名，默认 mm-x；不传时安装会问一句（留空用默认 mm-x），"
+  echo "           只在终端里问——一键命令管道/自动化时不问，直接用默认，不卡住等输入"
   echo "  --host   mmx:// 链接里的服务器地址，默认自动探测公网 IP；可以填域名或 IP，填了域名就按域名生成链接"
   echo "  --bin    服务端二进制路径，默认用脚本同目录下的 mmx-server-linux-amd64"
   echo "  --whitelist-ip   拉黑白名单 IP（可重复写多个）：白名单里的 IP 永远不拉黑；"
@@ -72,6 +82,15 @@ usage() {
   echo "                   和 --tls-domain 二选一；以后有了域名再用菜单第 7 项换成真 TLS"
   echo "  --tls-sni        自签 TLS 的默认 SNI（一个常见域名，例如 www.microsoft.com，默认就是它）；"
   echo "                   链接里写了 sni 参数就以链接为准"
+  echo "  流量统计与限额（默认不限额，只统计不限制；改了限额才限制）："
+  echo "  --traffic-mode   统计模式，默认 total：outbound（出站，下载方向）/ inbound（入站，上传方向）/"
+  echo "                   total（总计，入站+出站）/ max（最大值，取两者中大的那个）"
+  echo "  --traffic-period 统计周期，默认 monthly：monthly（月）/ quarterly（季，1/4/7/10 月起）/ yearly（年）"
+  echo "  --traffic-start-day 周期起始日，默认 1：1–31 号，月不足天数时按当月最后一天算（31 号在 2 月按 28/29 号算）"
+  echo "  --traffic-limit-mode 超限后的限制模式，默认 block：block（阻断，拒绝新连接并断开现有连接）/"
+  echo "                   throttle（TC 限速，降到 --traffic-throttle-rate 继续用）"
+  echo "  --traffic-quota  每周期流量限额，默认 0（不限）：数字 + K/M/G/T，例如 500G、1T"
+  echo "  --traffic-throttle-rate TC 限速值，默认 125K（约 1 Mbps）：超限后全站降到的速度，例如 1M"
   exit 1
 }
 
@@ -80,7 +99,7 @@ while [ $# -gt 0 ]; do
     --port) PORT="$2"; shift 2 ;;
     --rate) RATE="$2"; shift 2 ;;
     --burst) BURST="$2"; shift 2 ;;
-    --name) NAME="$2"; shift 2 ;;
+    --name) NAME="$2"; NAME_SET="1"; shift 2 ;;
     --host) HOST="$2"; shift 2 ;;
     --bin) BIN="$2"; shift 2 ;;
     --whitelist-ip) WHITELIST_IPS+=("$2"); shift 2 ;;
@@ -93,6 +112,12 @@ while [ $# -gt 0 ]; do
     --tls-key) TLS_KEY="$2"; shift 2 ;;
     --tls-auto) TLS_AUTO="1"; shift ;;
     --tls-sni) TLS_SNI="$2"; shift 2 ;;
+    --traffic-mode) TRAFFIC_MODE="$2"; shift 2 ;;
+    --traffic-period) TRAFFIC_PERIOD="$2"; shift 2 ;;
+    --traffic-start-day) TRAFFIC_START_DAY="$2"; shift 2 ;;
+    --traffic-limit-mode) TRAFFIC_LIMIT_MODE="$2"; shift 2 ;;
+    --traffic-quota) TRAFFIC_QUOTA="$2"; shift 2 ;;
+    --traffic-throttle-rate) TRAFFIC_THROTTLE_RATE="$2"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "未知参数：$1"; usage ;;
   esac
@@ -125,6 +150,31 @@ if [ -n "$TLS_SNI" ] && [ "$TLS_AUTO" != "1" ]; then
   echo "--tls-sni 只在自签 TLS（--tls-auto）模式下用"
   exit 1
 fi
+
+# 流量统计参数校验（中文别名也认，统一转成英文规范值写进配置）
+case "$TRAFFIC_MODE" in
+  out|outbound|出站) TRAFFIC_MODE="outbound" ;;
+  in|inbound|入站) TRAFFIC_MODE="inbound" ;;
+  total|总计) TRAFFIC_MODE="total" ;;
+  max|最大值) TRAFFIC_MODE="max" ;;
+  *) echo "流量统计模式不合法：$TRAFFIC_MODE，应为 outbound（出站）/ inbound（入站）/ total（总计）/ max（最大值）"; exit 1 ;;
+esac
+case "$TRAFFIC_PERIOD" in
+  monthly|month|月) TRAFFIC_PERIOD="monthly" ;;
+  quarterly|quarter|季) TRAFFIC_PERIOD="quarterly" ;;
+  yearly|year|年) TRAFFIC_PERIOD="yearly" ;;
+  *) echo "统计周期不合法：$TRAFFIC_PERIOD，应为 monthly（月）/ quarterly（季）/ yearly（年）"; exit 1 ;;
+esac
+case "$TRAFFIC_LIMIT_MODE" in
+  block|阻断) TRAFFIC_LIMIT_MODE="block" ;;
+  throttle|tc|限速|tc限速) TRAFFIC_LIMIT_MODE="throttle" ;;
+  *) echo "限制模式不合法：$TRAFFIC_LIMIT_MODE，应为 block（阻断）/ throttle（TC 限速）"; exit 1 ;;
+esac
+case "$TRAFFIC_START_DAY" in ''|*[!0-9]*) echo "周期起始日不合法：$TRAFFIC_START_DAY，应为 1–31 号"; exit 1;; esac
+if [ "$TRAFFIC_START_DAY" -lt 1 ] || [ "$TRAFFIC_START_DAY" -gt 31 ]; then echo "周期起始日不合法：$TRAFFIC_START_DAY，应为 1–31 号"; exit 1; fi
+printf '%s' "$TRAFFIC_QUOTA" | grep -Eq '^[0-9]+[KkMmGgTt]?$' || { echo "流量限额格式不对：$TRAFFIC_QUOTA（应为数字 + 可选 K/M/G/T，例如 500G、0）"; exit 1; }
+printf '%s' "$TRAFFIC_THROTTLE_RATE" | grep -Eq '^[0-9]+[KkMmGg]?$' || { echo "TC 限速值格式不对：$TRAFFIC_THROTTLE_RATE（应为数字 + 可选 K/M/G，例如 125K）"; exit 1; }
+if [ "$TRAFFIC_LIMIT_MODE" = "throttle" ] && [ "$TRAFFIC_THROTTLE_RATE" = "0" ]; then echo "TC 限速模式下限速值不能为 0（0 = 不限速，等于没限制）"; exit 1; fi
 
 # 随机高位端口：10000-60000
 if [ -z "$PORT" ]; then
@@ -164,11 +214,24 @@ if [ -z "$BIN" ]; then
 fi
 if [ ! -f "$BIN" ]; then echo "服务端二进制不存在：$BIN"; exit 1; fi
 
+# 节点名：没传 --name 时，写配置之前交互问一句，留空用默认 mm-x；
+# 只在 stdin 是终端时才问——一键命令是管道（curl | bash）、
+# 自动化脚本的 stdin 也不是终端，这时直接用默认，不许卡住等输入。
+if [ "$NAME_SET" = "0" ] && [ -t 0 ]; then
+  read -r -p "节点名（留空用默认 mm-x）： " NAME_INPUT || true
+  if [ -n "$NAME_INPUT" ]; then NAME="$NAME_INPUT"; fi
+fi
+
 echo "== 安装 mm-x 服务端 =="
 TLS_MODE_DESC="关"
 [ -n "$TLS_DOMAIN" ] && TLS_MODE_DESC="真 TLS（$TLS_DOMAIN）"
 [ "$TLS_AUTO" = "1" ] && TLS_MODE_DESC="自签 TLS（SNI ${TLS_SNI:-www.microsoft.com}）"
 echo "端口：$PORT；限速：$RATE；突发：$BURST；节点名：$NAME；回退：$FALLBACK；TLS：$TLS_MODE_DESC"
+if [ "$TRAFFIC_QUOTA" = "0" ]; then
+  echo "流量统计：模式 $TRAFFIC_MODE，周期 $TRAFFIC_PERIOD（每月 $TRAFFIC_START_DAY 日起），不限额（只统计，不限制）"
+else
+  echo "流量统计：模式 $TRAFFIC_MODE，周期 $TRAFFIC_PERIOD（每月 $TRAFFIC_START_DAY 日起），限额 $TRAFFIC_QUOTA，超限后 $TRAFFIC_LIMIT_MODE"
+fi
 
 # 1) 装二进制（更新模式下 BIN 就是已安装的文件，跳过自复制）
 mkdir -p "$BIN_DIR"
@@ -266,7 +329,7 @@ fi
 WHITELIST_IPS_STR="${WHITELIST_IPS[*]:-}"
 ALLOW_IPS_STR="${ALLOW_IPS[*]:-}"
 {
-  printf '%s=%q\n' PORT "$PORT" RATE "$RATE" BURST "$BURST" NAME "$NAME" HOST "$HOST" FALLBACK "$FALLBACK" TLS_DOMAIN "$TLS_DOMAIN" TLS_CERT "$TLS_CERT" TLS_KEY "$TLS_KEY" TLS_AUTO "$TLS_AUTO" TLS_SNI "$TLS_SNI" WHITELIST_IPS "$WHITELIST_IPS_STR" WHITELIST_FILE "$WHITELIST_FILE_INSTALLED" ALLOW_IPS "$ALLOW_IPS_STR" ALLOWLIST_FILE "$ALLOWLIST_FILE_INSTALLED"
+  printf '%s=%q\n' PORT "$PORT" RATE "$RATE" BURST "$BURST" NAME "$NAME" HOST "$HOST" FALLBACK "$FALLBACK" TLS_DOMAIN "$TLS_DOMAIN" TLS_CERT "$TLS_CERT" TLS_KEY "$TLS_KEY" TLS_AUTO "$TLS_AUTO" TLS_SNI "$TLS_SNI" WHITELIST_IPS "$WHITELIST_IPS_STR" WHITELIST_FILE "$WHITELIST_FILE_INSTALLED" ALLOW_IPS "$ALLOW_IPS_STR" ALLOWLIST_FILE "$ALLOWLIST_FILE_INSTALLED" TRAFFIC_MODE "$TRAFFIC_MODE" TRAFFIC_PERIOD "$TRAFFIC_PERIOD" TRAFFIC_START_DAY "$TRAFFIC_START_DAY" TRAFFIC_LIMIT_MODE "$TRAFFIC_LIMIT_MODE" TRAFFIC_QUOTA "$TRAFFIC_QUOTA" TRAFFIC_THROTTLE_RATE "$TRAFFIC_THROTTLE_RATE"
 } > "$CFG_FILE"
 chmod 600 "$CFG_FILE"
 echo "配置文件已写入：$CFG_FILE"
@@ -277,16 +340,16 @@ echo "配置文件已写入：$CFG_FILE"
 echo "== 安装管理菜单 =="
 cat > "$BIN_DIR/mm" <<'MM_MENU_EOF'
 #!/bin/bash
-# mm-x 服务端管理菜单：在 VPS 上输入 mm（或改名后的命令）呼出。
+# mm-x 服务端管理菜单：在 VPS 上输入 mm 呼出。
 # 功能：1 显示协议链接  2 查看服务状态  3 重启服务  4 更换密钥  5 修改限速
-#       6 查看最近日志  7 诱饵回退 / TLS 设置（真 TLS、自签 TLS、查指纹）  8 修改服务启动参数
-#       9 修改快捷命令  10 卸载  11 退出
+#       6 查看最近日志  7 诱饵回退 / TLS 设置（真 TLS、自签 TLS、查指纹）  8 修改节点参数（含流量设置）
+#       9 卸载  10 退出
 # 全部配置存在 /etc/mmx/config，密钥在 /etc/mmx/psk；
 # systemd 服务由本脚本按配置文件生成，改参数后自动重载 + 重启，
 # 重启失败自动回滚到改之前的配置，不会让服务起不来。
 # 隐藏用法（给部署脚本和脚本调用）：mm --write-service（按配置写服务文件）、mm --show-link [plain|opaque]（只打印链接，
 # 默认 plain 短格式；opaque 是一串乱码，只有新版客户端能认——默认绝不能先切过去）、
-# mm --show-pin（只打印 TLS 证书的 SPKI 指纹）。
+# mm --show-pin（只打印 TLS 证书的 SPKI 指纹）、mm --show-traffic（打印本周期流量统计）。
 set -u
 
 ROOT="${MMX_TEST_ROOT:-}"
@@ -299,11 +362,13 @@ UNIT_DIR="$ROOT/etc/systemd/system"
 UNIT_FILE="$UNIT_DIR/mmx-server.service"
 MYNAME="$(basename "$0")"
 
-# 默认值（配置文件缺失时用）
+# 默认值（配置文件缺失时用；老配置没有流量字段时也按这些默认走）
 PORT=""; RATE="6250K"; BURST="0"; NAME="mm-x"; HOST=""
 FALLBACK="site"; TLS_DOMAIN=""; TLS_CERT=""; TLS_KEY=""
 TLS_AUTO="0"; TLS_SNI=""
 WHITELIST_IPS=""; WHITELIST_FILE=""; ALLOW_IPS=""; ALLOWLIST_FILE=""
+TRAFFIC_MODE="total"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
+TRAFFIC_LIMIT_MODE="block"; TRAFFIC_QUOTA="0"; TRAFFIC_THROTTLE_RATE="125K"
 
 load_config() {
   if [ -f "$CFG_FILE" ]; then
@@ -315,14 +380,14 @@ load_config() {
 save_config() {
   mkdir -p "$CFG_DIR"
   {
-    printf '%s=%q\n' PORT "$PORT" RATE "$RATE" BURST "$BURST" NAME "$NAME" HOST "$HOST" FALLBACK "$FALLBACK" TLS_DOMAIN "$TLS_DOMAIN" TLS_CERT "$TLS_CERT" TLS_KEY "$TLS_KEY" TLS_AUTO "$TLS_AUTO" TLS_SNI "$TLS_SNI" WHITELIST_IPS "$WHITELIST_IPS" WHITELIST_FILE "$WHITELIST_FILE" ALLOW_IPS "$ALLOW_IPS" ALLOWLIST_FILE "$ALLOWLIST_FILE"
+    printf '%s=%q\n' PORT "$PORT" RATE "$RATE" BURST "$BURST" NAME "$NAME" HOST "$HOST" FALLBACK "$FALLBACK" TLS_DOMAIN "$TLS_DOMAIN" TLS_CERT "$TLS_CERT" TLS_KEY "$TLS_KEY" TLS_AUTO "$TLS_AUTO" TLS_SNI "$TLS_SNI" WHITELIST_IPS "$WHITELIST_IPS" WHITELIST_FILE "$WHITELIST_FILE" ALLOW_IPS "$ALLOW_IPS" ALLOWLIST_FILE "$ALLOWLIST_FILE" TRAFFIC_MODE "$TRAFFIC_MODE" TRAFFIC_PERIOD "$TRAFFIC_PERIOD" TRAFFIC_START_DAY "$TRAFFIC_START_DAY" TRAFFIC_LIMIT_MODE "$TRAFFIC_LIMIT_MODE" TRAFFIC_QUOTA "$TRAFFIC_QUOTA" TRAFFIC_THROTTLE_RATE "$TRAFFIC_THROTTLE_RATE"
   } > "$CFG_FILE"
   chmod 600 "$CFG_FILE"
 }
 
 # 按当前配置写 systemd 服务文件（不重载、不重启，只写文件）
 write_service() {
-  local tls_args="" wl_args="" al_args="" ip e
+  local tls_args="" wl_args="" al_args="" traffic_args="" ip e
   if [ -n "$TLS_DOMAIN" ]; then
     tls_args=" --tls-domain $TLS_DOMAIN --tls-cert $TLS_CERT --tls-key $TLS_KEY"
   elif [ "${TLS_AUTO:-0}" = "1" ]; then
@@ -335,6 +400,9 @@ write_service() {
   if [ -n "$WHITELIST_FILE" ]; then wl_args="$wl_args --whitelist-file $WHITELIST_FILE"; fi
   for e in $ALLOW_IPS; do al_args="$al_args --allowlist $e"; done
   if [ -n "$ALLOWLIST_FILE" ]; then al_args="$al_args --allowlist-file $ALLOWLIST_FILE"; fi
+  # 流量统计与限额：一直写进启动参数（限额 0 = 不限，只统计不限制）；
+  # 计数持久化文件固定在配置目录下（/etc/mmx/traffic.json）。
+  traffic_args=" --traffic-mode ${TRAFFIC_MODE:-total} --traffic-period ${TRAFFIC_PERIOD:-monthly} --traffic-start-day ${TRAFFIC_START_DAY:-1} --traffic-limit-mode ${TRAFFIC_LIMIT_MODE:-block} --traffic-quota ${TRAFFIC_QUOTA:-0} --traffic-throttle-rate ${TRAFFIC_THROTTLE_RATE:-125K} --traffic-file $CFG_DIR/traffic.json"
   mkdir -p "$UNIT_DIR"
   cat > "$UNIT_FILE" <<UNIT_EOF
 [Unit]
@@ -347,7 +415,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=$SERVER_BIN --psk-file $PSK_FILE --listen 0.0.0.0:$PORT --rate $RATE --burst $BURST --name "$NAME" --fallback $FALLBACK$tls_args$wl_args$al_args
+ExecStart=$SERVER_BIN --psk-file $PSK_FILE --listen 0.0.0.0:$PORT --rate $RATE --burst $BURST --name "$NAME" --fallback $FALLBACK$tls_args$wl_args$al_args$traffic_args
 Restart=always
 RestartSec=5
 # 密钥文件只让 root 读，服务以 root 跑（只监听一个端口，不写别的目录）
@@ -400,6 +468,30 @@ valid_port() {
 valid_rate() {
   case "$1" in 0) return 0;; esac
   printf '%s' "$1" | grep -Eq '^[0-9]+[KkMmGg]?$'
+}
+
+# 流量限额格式：数字 + 可选 K/M/G/T（不区分大小写），0 表示不限额
+valid_bytes() {
+  case "$1" in 0) return 0;; esac
+  printf '%s' "$1" | grep -Eq '^[0-9]+[KkMmGgTt]?$'
+}
+
+# 流量统计模式/周期/限制模式的中文名（菜单显示用；配置里存英文规范值）
+traffic_mode_label() {
+  case "${TRAFFIC_MODE:-total}" in
+    outbound) echo "出站" ;; inbound) echo "入站" ;;
+    max) echo "最大值" ;; *) echo "总计" ;;
+  esac
+}
+traffic_period_label() {
+  case "${TRAFFIC_PERIOD:-monthly}" in
+    quarterly) echo "季" ;; yearly) echo "年" ;; *) echo "月" ;;
+  esac
+}
+traffic_limit_label() {
+  case "${TRAFFIC_LIMIT_MODE:-block}" in
+    throttle) echo "TC 限速" ;; *) echo "阻断" ;;
+  esac
 }
 
 # IPv4 或 IPv4/CIDR（例如 1.2.3.4、5.6.7.0/24）
@@ -542,6 +634,131 @@ show_logs() {
   fi
 }
 
+# 查看流量：调服务端程序现算（mmx-server --traffic-status），
+# 计数存在 /etc/mmx/traffic.json，服务重启不丢；服务还没跑过时显示 0。
+# 用法：show_traffic（交互菜单里用），隐藏用法 mm --show-traffic 也走这里。
+show_traffic() {
+  load_config
+  if [ ! -x "$SERVER_BIN" ]; then echo "服务端程序不在：$SERVER_BIN（被删了？请重装）"; return 1; fi
+  "$SERVER_BIN" --traffic-status --traffic-mode "${TRAFFIC_MODE:-total}" --traffic-period "${TRAFFIC_PERIOD:-monthly}" --traffic-start-day "${TRAFFIC_START_DAY:-1}" --traffic-limit-mode "${TRAFFIC_LIMIT_MODE:-block}" --traffic-quota "${TRAFFIC_QUOTA:-0}" --traffic-throttle-rate "${TRAFFIC_THROTTLE_RATE:-125K}" --traffic-file "$CFG_DIR/traffic.json" 2>&1
+}
+
+# 流量设置：统计模式 / 周期 / 起始日 / 限制模式 / 限额 / TC 限速值都能改，
+# 改完走 apply_config（重载 + 重启，失败自动回滚）；只改限额/限制模式/
+# TC 限速值不重置计数，改统计模式/周期/起始日会按新口径重算。
+# 入口在第 8 项“修改节点参数”子菜单第 11 项。
+traffic_menu() {
+  while true; do
+    load_config
+    echo ""
+    echo "--- 流量设置 ---"
+    show_traffic
+    echo "统计模式：$(traffic_mode_label)　统计周期：$(traffic_period_label)　起始日：${TRAFFIC_START_DAY:-1} 日"
+    echo "限制模式：$(traffic_limit_label)　限额：${TRAFFIC_QUOTA:-0}　TC 限速值：${TRAFFIC_THROTTLE_RATE:-125K}"
+    echo "1) 查看流量"
+    echo "2) 统计模式（出站 / 入站 / 总计 / 最大值）"
+    echo "3) 统计周期（月 / 季 / 年）"
+    echo "4) 周期起始日（1–31 号）"
+    echo "5) 限制模式（阻断 / TC 限速）"
+    echo "6) 限额（例如 500G，0 = 不限）"
+    echo "7) TC 限速值（例如 1M，默认 125K）"
+    echo "8) 清零本周期流量"
+    echo "0) 返回"
+    local c
+    read -r -p "选一项： " c || return 0
+    case "$c" in
+      1) show_traffic ;;
+      2)
+        local nm
+        echo "出站 = 下载方向，入站 = 上传方向，总计 = 入站+出站，最大值 = 取两者中大的那个"
+        read -r -p "新统计模式（outbound/inbound/total/max，留空不变）： " nm || continue
+        [ -z "$nm" ] && { echo "没改。"; pause; continue; }
+        case "$nm" in
+          out|outbound|出站) TRAFFIC_MODE="outbound" ;;
+          in|inbound|入站) TRAFFIC_MODE="inbound" ;;
+          total|总计) TRAFFIC_MODE="total" ;;
+          max|最大值) TRAFFIC_MODE="max" ;;
+          *) echo "统计模式不对：$nm（应为 outbound/inbound/total/max）"; pause; continue ;;
+        esac
+        apply_config "流量统计模式改为 $(traffic_mode_label)（计数按新口径重算）"
+        ;;
+      3)
+        local np
+        read -r -p "新统计周期（monthly/quarterly/yearly，留空不变）： " np || continue
+        [ -z "$np" ] && { echo "没改。"; pause; continue; }
+        case "$np" in
+          monthly|month|月) TRAFFIC_PERIOD="monthly" ;;
+          quarterly|quarter|季) TRAFFIC_PERIOD="quarterly" ;;
+          yearly|year|年) TRAFFIC_PERIOD="yearly" ;;
+          *) echo "统计周期不对：$np（应为 monthly/quarterly/yearly）"; pause; continue ;;
+        esac
+        apply_config "流量统计周期改为 $(traffic_period_label)（计数按新口径重算）"
+        ;;
+      4)
+        local nd
+        read -r -p "新周期起始日（1–31 号，留空不变）： " nd || continue
+        [ -z "$nd" ] && { echo "没改。"; pause; continue; }
+        case "$nd" in ''|*[!0-9]*) echo "起始日不对：$nd（应为 1–31 号）"; pause; continue;; esac
+        if [ "$nd" -lt 1 ] || [ "$nd" -gt 31 ]; then echo "起始日不对：$nd（应为 1–31 号）"; pause; continue; fi
+        TRAFFIC_START_DAY="$nd"
+        apply_config "流量周期起始日改为 $TRAFFIC_START_DAY 日（计数按新口径重算）"
+        ;;
+      5)
+        local nl
+        read -r -p "新限制模式（block=阻断 / throttle=TC 限速，留空不变）： " nl || continue
+        [ -z "$nl" ] && { echo "没改。"; pause; continue; }
+        case "$nl" in
+          block|阻断) TRAFFIC_LIMIT_MODE="block" ;;
+          throttle|tc|限速|tc限速) TRAFFIC_LIMIT_MODE="throttle" ;;
+          *) echo "限制模式不对：$nl（应为 block/throttle）"; pause; continue ;;
+        esac
+        if [ "$TRAFFIC_LIMIT_MODE" = "throttle" ] && [ "${TRAFFIC_THROTTLE_RATE:-125K}" = "0" ]; then
+          echo "TC 限速模式下限速值不能为 0，先用第 7 项把 TC 限速值改成大于 0 的数。"
+          TRAFFIC_LIMIT_MODE="block"
+          pause; continue
+        fi
+        apply_config "流量限制模式改为 $(traffic_limit_label)"
+        ;;
+      6)
+        local nq
+        read -r -p "新限额（数字 + K/M/G/T，例如 500G，0 = 不限，留空不变）： " nq || continue
+        [ -z "$nq" ] && { echo "没改。"; pause; continue; }
+        valid_bytes "$nq" || { echo "限额格式不对：$nq（应为数字 + 可选 K/M/G/T，例如 500G、0）"; pause; continue; }
+        TRAFFIC_QUOTA="$nq"
+        apply_config "流量限额改为 $TRAFFIC_QUOTA"
+        ;;
+      7)
+        local nt
+        read -r -p "新 TC 限速值（数字 + K/M/G，例如 1M，默认 125K，留空不变）： " nt || continue
+        [ -z "$nt" ] && { echo "没改。"; pause; continue; }
+        valid_rate "$nt" || { echo "TC 限速值格式不对：$nt（应为数字 + 可选 K/M/G，例如 1M、125K）"; pause; continue; }
+        if [ "$nt" = "0" ] && [ "${TRAFFIC_LIMIT_MODE:-block}" = "throttle" ]; then
+          echo "TC 限速模式下限速值不能为 0（0 = 不限速，等于没限制）"
+          pause; continue
+        fi
+        TRAFFIC_THROTTLE_RATE="$nt"
+        apply_config "TC 限速值改为 $TRAFFIC_THROTTLE_RATE"
+        ;;
+      8)
+        local yn
+        echo "要清零本周期已统计的流量（计数从 0 重新开始），限额和设置不变。"
+        read -r -p "确认清零吗？输入 y 确认： " yn || continue
+        case "$yn" in y|Y) ;; *) echo "已取消。"; pause; continue;; esac
+        systemctl stop mmx-server 2>/dev/null || true
+        rm -f "$CFG_DIR/traffic.json"
+        if systemctl restart mmx-server 2>/dev/null && systemctl is-active --quiet mmx-server 2>/dev/null; then
+          echo "已清零：本周期流量从 0 重新开始统计"
+        else
+          echo "清零后服务没起来！请看日志：journalctl -u mmx-server -n 50"
+        fi
+        ;;
+      0|"") return 0 ;;
+      *) echo "没有这个选项" ;;
+    esac
+    pause
+  done
+}
+
 # 7) 诱饵回退 / TLS 设置：真 TLS（有域名）和自签 TLS（没域名）二选一；
 #    自签证书首次启动自动生成并存到 /etc/mmx/tls-cert.pem、tls-key.pem，
 #    客户端靠链接里的 pin（SPKI 指纹）锁定验证；换证书要重新生成链接（第 1 项）。
@@ -621,13 +838,14 @@ tls_menu() {
   done
 }
 
-# 8) 修改服务启动参数：先显示当前启动命令，再按项改；改完校验，写回配置，
-#    重载 + 重启，重启失败自动回滚。
+# 8) 修改节点参数：先显示当前启动命令，再按项改；改完校验，写回配置，
+#    重载 + 重启，重启失败自动回滚。第 11 项是流量设置（统计模式/周期/
+#    起始日/限制模式/限额/TC 限速值 + 查看流量）。
 edit_params() {
   while true; do
     load_config
     echo ""
-    echo "--- 修改服务启动参数 ---"
+    echo "--- 修改节点参数 ---"
     echo "当前启动命令："
     if [ -f "$UNIT_FILE" ]; then grep '^ExecStart=' "$UNIT_FILE" | sed 's/^ExecStart=//'; else echo "（服务文件不存在，请重装）"; fi
     echo "1) 端口（当前 $PORT）"
@@ -640,6 +858,7 @@ edit_params() {
     echo "8) 拉黑白名单文件（当前 ${WHITELIST_FILE:-未设置}）"
     echo "9) 连接白名单文件（当前 ${ALLOWLIST_FILE:-未设置}）"
     echo "10) 诱饵回退 / TLS 设置"
+    echo "11) 流量设置（统计模式 / 周期 / 限额 / 查看流量）"
     echo "0) 返回"
     local c
     read -r -p "改哪一项： " c || return 0
@@ -731,6 +950,7 @@ edit_params() {
         apply_config "连接白名单文件改为 ${ALLOWLIST_FILE:-未设置}"
         ;;
       10) tls_menu ;;
+      11) traffic_menu ;;
       0|"") return 0 ;;
       *) echo "没有这个选项" ;;
     esac
@@ -738,34 +958,7 @@ edit_params() {
   done
 }
 
-# 9) 修改快捷命令：把 mm 改成新名字；只允许字母数字下划线短横线，
-#    不能和系统已有命令重名；新名字生效后旧的删掉。
-rename_cmd() {
-  echo "当前快捷命令：$MYNAME"
-  local new old_path new_path
-  read -r -p "新名字（只允许字母、数字、下划线、短横线）： " new || return 0
-  case "$new" in
-    ""|*[!a-zA-Z0-9_-]*) echo "名字不合法：只能用字母、数字、下划线、短横线"; return 1;;
-  esac
-  if [ "$new" = "$MYNAME" ]; then echo "新名字和现在一样，没改。"; return 0; fi
-  if [ "$new" = "mmx-server" ] || [ "$new" = "mmx-client" ]; then
-    echo "这个名字是 mm-x 自己的程序名，不能用"; return 1
-  fi
-  if command -v "$new" >/dev/null 2>&1 || [ -e "$BIN_DIR/$new" ] || [ -e "/usr/bin/$new" ] || [ -e "/bin/$new" ]; then
-    echo "名字冲突：系统里已经有叫 $new 的命令/文件，换一个名字"; return 1
-  fi
-  old_path="$BIN_DIR/$MYNAME"
-  new_path="$BIN_DIR/$new"
-  if [ ! -f "$old_path" ]; then echo "找不到当前命令文件：$old_path"; return 1; fi
-  cp "$old_path" "$new_path" && chmod +x "$new_path" || { echo "改名失败：复制新命令时出错"; return 1; }
-  rm -f "$old_path"
-  echo "已改名：以后用 \`$new\` 呼出菜单（旧的 \`$MYNAME\` 已删除）"
-  # 用新名字重新执行本脚本（继续显示菜单，证明新命令能用）；
-  # 旧文件已删，exec 新文件不会读到一半断掉。
-  exec "$new_path" --renamed "$MYNAME" "$new"
-}
-
-# 10) 卸载：停服务、删服务文件、删程序、删菜单命令、删配置（含密钥）；BBR 设置保留。
+# 9) 卸载：停服务、删服务文件、删程序、删菜单命令、删配置（含密钥）；BBR 设置保留。
 uninstall() {
   load_config
   echo "要卸载 mm-x 服务端，将删除：服务 mmx-server、程序 $SERVER_BIN、菜单命令 $BIN_DIR/$MYNAME、配置 $CFG_DIR（含密钥）。"
@@ -786,11 +979,11 @@ uninstall() {
 
 main() {
   if [ "$(id -u)" -ne 0 ]; then echo "请用 sudo 运行：sudo $MYNAME"; exit 1; fi
-  # 隐藏用法：部署脚本装完后按配置写服务文件；只打印链接；只打印 TLS 指纹；改名后重新执行
+  # 隐藏用法：部署脚本装完后按配置写服务文件；只打印链接；只打印 TLS 指纹；只打印流量统计
   if [ "${1:-}" = "--write-service" ]; then load_config; write_service; exit 0; fi
   if [ "${1:-}" = "--show-link" ]; then show_link "${2:-plain}"; exit 0; fi
   if [ "${1:-}" = "--show-pin" ]; then show_pin; exit 0; fi
-  if [ "${1:-}" = "--renamed" ]; then echo "（已切换到新命令 ${3:-$MYNAME}）"; fi
+  if [ "${1:-}" = "--show-traffic" ]; then show_traffic; exit 0; fi
   while true; do
     load_config
     echo ""
@@ -810,10 +1003,9 @@ main() {
     echo "5) 修改限速"
     echo "6) 查看最近日志"
     echo "7) 诱饵回退 / TLS 设置"
-    echo "8) 修改服务启动参数"
-    echo "9) 修改快捷命令"
-    echo "10) 卸载"
-    echo "11) 退出"
+    echo "8) 修改节点参数"
+    echo "9) 卸载"
+    echo "10) 退出"
     local c
     read -r -p "选一项： " c || exit 0
     case "$c" in
@@ -825,9 +1017,8 @@ main() {
       6) show_logs ;;
       7) tls_menu ;;
       8) edit_params ;;
-      9) rename_cmd ;;
-      10) uninstall ;;
-      11|"") exit 0 ;;
+      9) uninstall ;;
+      10|"") exit 0 ;;
       *) echo "没有这个选项" ;;
     esac
     pause
@@ -859,6 +1050,11 @@ echo "== 安装完成 =="
 echo "监听端口：$PORT"
 echo "限速上限：$RATE（0 = 不限速），突发额度：$BURST"
 echo "回退模式：$FALLBACK；TLS：$TLS_MODE_DESC"
+if [ "$TRAFFIC_QUOTA" = "0" ]; then
+  echo "流量统计：不限额（只统计，不限制）；想限制去 mm 菜单第 8 项 → 流量设置"
+else
+  echo "流量统计：限额 $TRAFFIC_QUOTA，超限后 $TRAFFIC_LIMIT_MODE；查看用量去 mm 菜单第 8 项 → 流量设置 → 查看流量"
+fi
 echo "密钥文件：$PSK_FILE（重装不换密钥；轮换密钥：mm 菜单第 4 项，24 小时内新旧密钥都能用）"
 echo "配置文件：$CFG_FILE（菜单改参数就改这个文件）"
 echo "服务状态：mm 菜单第 2 项，或 systemctl status mmx-server；日志：mm 菜单第 6 项，或 journalctl -u mmx-server -f"

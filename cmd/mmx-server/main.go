@@ -13,9 +13,11 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -87,6 +89,17 @@ func main() {
 	tlsKey := flag.String("tls-key", "", "TLS 私钥文件：真证书模式给 privkey.pem；自签模式给存放路径（默认 tls-key.pem）")
 	tlsAuto := flag.Bool("tls-auto", false, "自签 TLS 模式：证书文件不存在时自动生成自签证书并存下来（没域名时用；和 --tls-domain 二选一）")
 	tlsSNI := flag.String("tls-sni", mmx.DefaultSNI, "TLS 握手用的默认 SNI（没域名时用常见域名；链接里写了 sni 参数就以链接为准；真证书模式默认用 --tls-domain 的域名）")
+	// 流量统计与限额（全服务总量，单用户单 PSK）：只统计中继层真实转发的
+	// 字节数，不计握手；计数持久化到文件，服务重启不丢；周期边界一到
+	// 自动清零。限额 0 = 不限（默认，只统计不限制，不改变现有行为）。
+	trafficModeStr := flag.String("traffic-mode", "total", "流量统计模式：outbound（出站，服务端→客户端，下载方向）/ inbound（入站）/ total（总计，默认）/ max（最大值，取两者中大的）")
+	trafficPeriodStr := flag.String("traffic-period", "monthly", "统计周期：monthly（月，默认）/ quarterly（季，1/4/7/10 月起）/ yearly（年）")
+	trafficStartDay := flag.Int("traffic-start-day", 1, "周期起始日：1–31 号，月不足天数时按当月最后一天算（例如 31 号在 2 月按 28/29 号算）")
+	trafficLimitModeStr := flag.String("traffic-limit-mode", "block", "超限后的限制模式：block（阻断，默认，拒绝新连接并断开现有连接）/ throttle（TC 限速，降到 --traffic-throttle-rate 继续用）")
+	trafficQuotaStr := flag.String("traffic-quota", "0", "每周期流量限额，例如 500G / 1T，0 = 不限（功能关闭，默认）")
+	trafficThrottleStr := flag.String("traffic-throttle-rate", "125K", "TC 限速值：超限后全站降到的速度，例如 1M，默认 125K（约 1 Mbps）")
+	trafficFile := flag.String("traffic-file", "/etc/mmx/traffic.json", "流量计数持久化文件：服务重启不丢计数；空字符串 = 不持久化")
+	trafficStatus := flag.Bool("traffic-status", false, "只打印本周期流量统计然后退出（mm 菜单查看流量用）")
 	printPin := flag.Bool("print-pin", false, "打印 TLS 证书的 SPKI 指纹（base64url）并退出（mm 菜单查指纹用）")
 	flag.Parse()
 
@@ -177,6 +190,41 @@ func main() {
 		if err != nil {
 			log.Fatalf("突发参数不合法：%v", err)
 		}
+	}
+
+	// 流量统计与限额配置（校验失败直接启动失败，指明错在哪一项）。
+	trafficCfg := mmx.DefaultTrafficConfig()
+	trafficCfg.Mode, err = mmx.ParseTrafficMode(*trafficModeStr)
+	if err != nil {
+		log.Fatalf("流量统计：%v", err)
+	}
+	trafficCfg.Period, err = mmx.ParseTrafficPeriod(*trafficPeriodStr)
+	if err != nil {
+		log.Fatalf("流量统计：%v", err)
+	}
+	trafficCfg.StartDay = *trafficStartDay
+	trafficCfg.LimitMode, err = mmx.ParseTrafficLimitMode(*trafficLimitModeStr)
+	if err != nil {
+		log.Fatalf("流量统计：%v", err)
+	}
+	trafficCfg.Quota, err = mmx.ParseBytes(*trafficQuotaStr)
+	if err != nil {
+		log.Fatalf("流量统计：%v", err)
+	}
+	trafficCfg.ThrottleRate, err = mmx.ParseRate(*trafficThrottleStr)
+	if err != nil {
+		log.Fatalf("流量统计：%v", err)
+	}
+	trafficCfg.File = *trafficFile
+	if err := trafficCfg.Validate(); err != nil {
+		log.Fatalf("流量统计：%v", err)
+	}
+	// 只打印流量统计然后退出（mm 菜单“查看流量”走这里）：
+	// 不碰密钥、不监听端口，读持久化文件里的计数现算。
+	if *trafficStatus {
+		tc := mmx.NewTrafficCounter(trafficCfg)
+		fmt.Print(tc.Status().FormatStatus())
+		return
 	}
 
 	var psk []byte
@@ -308,6 +356,33 @@ func main() {
 		fmt.Println("诱饵回退：关（silent，非 mm-x 连接 0 字节回包、直接断开）")
 	}
 
+	// 流量统计与限额：计数器建好就开始记；后台每 5 秒写盘一次，
+	// 收到 SIGTERM/SIGINT（systemctl stop/restart）时先写盘再退出，
+	// 计数不会因为重启丢掉。
+	tc := mmx.NewTrafficCounter(trafficCfg)
+	tc.StartAutoSave(5 * time.Second)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigCh
+		tc.Flush()
+		os.Exit(0)
+	}()
+	if trafficCfg.Quota > 0 {
+		if trafficCfg.LimitMode == mmx.TrafficLimitThrottle {
+			log.Printf("流量统计：模式 %s，周期 %s，限额 %s，超限后 TC 限速到 %s/s",
+				trafficCfg.Mode.Label(), mmx.PeriodDesc(trafficCfg.Period, trafficCfg.StartDay),
+				mmx.FormatBytesHuman(trafficCfg.Quota), mmx.FormatBytesHuman(trafficCfg.ThrottleRate))
+		} else {
+			log.Printf("流量统计：模式 %s，周期 %s，限额 %s，超限后阻断",
+				trafficCfg.Mode.Label(), mmx.PeriodDesc(trafficCfg.Period, trafficCfg.StartDay),
+				mmx.FormatBytesHuman(trafficCfg.Quota))
+		}
+	} else {
+		log.Printf("流量统计：模式 %s，周期 %s，不限额（只统计，不限制）",
+			trafficCfg.Mode.Label(), mmx.PeriodDesc(trafficCfg.Period, trafficCfg.StartDay))
+	}
+
 	// v3 起单端口双模式：同一个监听端口同时接受明文 mm-x 和真实 TLS，
 	// handleConn 靠首记录分流——所以这里永远是明文监听，
 	// TLS 只在分流后按需包上去（tlsCfg 为 nil = 没开 TLS）。
@@ -338,6 +413,10 @@ func main() {
 	// v2 连接是按请求建的，下次握手自然用新密钥，不用登记断开。
 	live := &liveConns{m: make(map[net.Conn][]byte)}
 	go watchKeyRotation(km, live, *pskFile)
+	// 流量阻断监视：限额一到就断开所有现有连接（新连接在 handleConn
+	// 里直接丢弃）；只在“没超限 → 超限”的跳变时动作一次，
+	// 否则每秒都断一次、日志每秒刷一条。
+	go watchTrafficBlock(tc, live)
 	// 握手重放防护：盐缓存（10 分钟）+ 连接数上限（全局/单 IP）。
 	// 缓存和限制器都在主循环外建好，随连接传进去。
 	replayCache := mmx.NewReplayCache(10 * time.Minute)
@@ -356,7 +435,7 @@ func main() {
 			raw.Close()
 			continue
 		}
-		go handleConn(raw, km, serverRate, serverBurst, blocklist, allowlist, *fallback, tlsCfg, live, replayCache, connLimiter, *allowPrivate)
+		go handleConn(raw, km, serverRate, serverBurst, blocklist, allowlist, *fallback, tlsCfg, live, replayCache, connLimiter, *allowPrivate, tc)
 	}
 }
 
@@ -393,6 +472,38 @@ func (r *liveConns) closeWithKey(psk []byte) int {
 		c.Close()
 	}
 	return len(conns)
+}
+
+// closeAll 断开所有登记的连接（流量阻断模式超限时用），返回断开的条数。
+func (r *liveConns) closeAll() int {
+	r.mu.Lock()
+	var conns []net.Conn
+	for c := range r.m {
+		conns = append(conns, c)
+	}
+	r.mu.Unlock()
+	for _, c := range conns {
+		c.Close()
+	}
+	return len(conns)
+}
+
+// watchTrafficBlock 监视流量限额：阻断模式下超限就断开所有现有连接，
+// 新连接在 handleConn 里直接丢弃。只在跳变时动作一次，
+// 恢复（新周期 / 限额改大）后下次超限会再次动作。
+func watchTrafficBlock(tc *mmx.TrafficCounter, live *liveConns) {
+	enforced := false
+	for range time.Tick(time.Second) {
+		if tc.Blocked() {
+			if !enforced {
+				enforced = true
+				n := live.closeAll()
+				log.Printf("流量超限（阻断模式）：已断开 %d 条现有连接，本周期限额已用完，新连接将被拒绝", n)
+			}
+		} else {
+			enforced = false
+		}
+	}
 }
 
 // watchKeyRotation 监视密钥轮换（A4）：密钥文件变了就按旧密钥的宽限期
@@ -493,13 +604,18 @@ type peekConn struct {
 
 func (p *peekConn) Read(b []byte) (int, error) { return p.r.Read(b) }
 
-func handleConn(raw net.Conn, km *mmx.KeyManager, serverRate, serverBurst int64, bl *mmx.Blocklist, al *mmx.Allowlist, fallback string, tlsCfg *tls.Config, live *liveConns, replayCache *mmx.ReplayCache, connLimiter *mmx.ConnLimiter, allowPrivate bool) {
+func handleConn(raw net.Conn, km *mmx.KeyManager, serverRate, serverBurst int64, bl *mmx.Blocklist, al *mmx.Allowlist, fallback string, tlsCfg *tls.Config, live *liveConns, replayCache *mmx.ReplayCache, connLimiter *mmx.ConnLimiter, allowPrivate bool, tc *mmx.TrafficCounter) {
 	remote := raw.RemoteAddr().String()
 	defer raw.Close()
 	// 归还连接名额（accept 循环里占的）：无论哪条路返回都执行，
 	// 包括白名单/拉黑丢弃——占了名额就得还，否则名额越占越少。
 	ip, _, _ := net.SplitHostPort(remote)
 	defer connLimiter.Release(ip)
+	// 登记这条连接：流量阻断模式超限时监视 goroutine 会断开它
+	//（v3 会话在 serveMMX 里还会再登记一次，带密钥——那是给
+	// 密钥轮换用的，两条登记各管各的，互不干扰）。
+	live.add(raw, nil)
+	defer live.remove(raw)
 
 	// 连接白名单检查：要在握手之前做——不在白名单就直接丢弃，不回应任何字节，
 	// 也不记日志（避免扫描流量刷屏）；白名单里的 IP 仍要过后面的正常握手和密钥校验，
@@ -510,6 +626,12 @@ func handleConn(raw net.Conn, km *mmx.KeyManager, serverRate, serverBurst int64,
 
 	// 拉黑检查：被拉黑的 IP 直接丢弃，不回应任何字节，也不记日志（避免日志刷屏）
 	if bl.IsBlocked(ip) {
+		return
+	}
+
+	// 流量阻断：超限后新连接直接丢弃（不握手、不回包、不记日志，
+	// 和拉黑一个路子——避免拒绝日志刷屏；已有连接由监视 goroutine 断开）。
+	if tc.Blocked() {
 		return
 	}
 
@@ -580,7 +702,7 @@ func handleConn(raw net.Conn, km *mmx.KeyManager, serverRate, serverBurst int64,
 	}
 	payload := rec[5:]
 	if mmx.LooksLikeMMXHandshake(payload, km.Keys()) != 0 {
-		serveMMX(pc, km, serverRate, serverBurst, bl, remote, ip, fallback, recordFail, live, replayCache, allowPrivate)
+		serveMMX(pc, km, serverRate, serverBurst, bl, remote, ip, fallback, recordFail, live, replayCache, allowPrivate, tc)
 		return
 	}
 	if tlsCfg != nil && mmx.LooksLikeClientHello(payload) {
@@ -588,13 +710,13 @@ func handleConn(raw net.Conn, km *mmx.KeyManager, serverRate, serverBurst int64,
 		// 外层 bufio 里可能已缓冲了 ClientHello 之后的密文，
 		// 它们经 tls.Conn 的 Read 照样能读到，不会丢；内层再建一个
 		// peekConn 读解密后的明文，两层缓冲各管各的。
-		tc := tls.Server(pc, tlsCfg)
-		_ = tc.SetDeadline(time.Now().Add(5 * time.Second))
-		if err := tc.Handshake(); err != nil {
+		tlsConn := tls.Server(pc, tlsCfg)
+		_ = tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
+		if err := tlsConn.Handshake(); err != nil {
 			return // TLS 握手没完成：静默断开（crypto/tls 会按 TLS 规范回 alert，这是正常行为）
 		}
-		_ = tc.SetDeadline(time.Time{})
-		serveInnerTLS(tc, km, serverRate, serverBurst, bl, remote, ip, fallback, recordFail, live, replayCache, allowPrivate)
+		_ = tlsConn.SetDeadline(time.Time{})
+		serveInnerTLS(tlsConn, km, serverRate, serverBurst, bl, remote, ip, fallback, recordFail, live, replayCache, allowPrivate, tc)
 		return
 	}
 	// 既不是 mm-x 也不是 ClientHello：site 模式回一个像网站的 400 页
@@ -607,7 +729,7 @@ func handleConn(raw net.Conn, km *mmx.KeyManager, serverRate, serverBurst int64,
 
 // serveInnerTLS 处理 TLS 会话里面的内容：TLS 握手已完成，
 // 再看解密后的首字节是 mm-x 握手还是 HTTP（诱饵站）。
-func serveInnerTLS(tc *tls.Conn, km *mmx.KeyManager, serverRate, serverBurst int64, bl *mmx.Blocklist, remote, ip, fallback string, recordFail func(string), live *liveConns, replayCache *mmx.ReplayCache, allowPrivate bool) {
+func serveInnerTLS(tc *tls.Conn, km *mmx.KeyManager, serverRate, serverBurst int64, bl *mmx.Blocklist, remote, ip, fallback string, recordFail func(string), live *liveConns, replayCache *mmx.ReplayCache, allowPrivate bool, traf *mmx.TrafficCounter) {
 	defer tc.Close()
 	innerPC := &peekConn{Conn: tc, r: bufio.NewReaderSize(tc, 32768)}
 	_ = tc.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -637,14 +759,14 @@ func serveInnerTLS(tc *tls.Conn, km *mmx.KeyManager, serverRate, serverBurst int
 		recordFail("不是 mm-x 握手（TLS 内乱字节）")
 		return
 	}
-	serveMMX(innerPC, km, serverRate, serverBurst, bl, remote, ip, fallback, recordFail, live, replayCache, allowPrivate)
+	serveMMX(innerPC, km, serverRate, serverBurst, bl, remote, ip, fallback, recordFail, live, replayCache, allowPrivate, traf)
 }
 
 // serveMMX 在一条已分流确认是 mm-x 的连接上做握手，
 // 按协商出的版本分流：v3 走复用会话，v2 走老 CONNECT 单连接。
 // 握手带重放防护（盐缓存 + 时间戳）：重放的握手在这里失败，
 // 不会走到后面的 RecordSuccess，攻击者 IP 不会被标成信任。
-func serveMMX(pc *peekConn, km *mmx.KeyManager, serverRate, serverBurst int64, bl *mmx.Blocklist, remote, ip, fallback string, recordFail func(string), live *liveConns, replayCache *mmx.ReplayCache, allowPrivate bool) {
+func serveMMX(pc *peekConn, km *mmx.KeyManager, serverRate, serverBurst int64, bl *mmx.Blocklist, remote, ip, fallback string, recordFail func(string), live *liveConns, replayCache *mmx.ReplayCache, allowPrivate bool, tc *mmx.TrafficCounter) {
 	keys, err := mmx.ServerHandshakeWithKeysAndReplay(pc, km.Keys(), replayCache)
 	if err != nil {
 		if fallback == "site" {
@@ -667,19 +789,19 @@ func serveMMX(pc *peekConn, km *mmx.KeyManager, serverRate, serverBurst int64, b
 		// 监视 goroutine 只断开用旧密钥建的会话。
 		live.add(pc, keys.PSK)
 		defer live.remove(pc)
-		if err := mmx.ServeMuxSession(mc, serverRate, serverBurst, remote, allowPrivate, mmx.SessionIdleTimeout); err != nil {
+		if err := mmx.ServeMuxSession(mc, serverRate, serverBurst, remote, allowPrivate, mmx.SessionIdleTimeout, tc); err != nil {
 			log.Printf("[%s] v3/v4 会话结束：%v", remote, err)
 		} else {
 			log.Printf("[%s] v3/v4 会话结束", remote)
 		}
 		return
 	}
-	serveV2(mc, serverRate, serverBurst, remote, allowPrivate)
+	serveV2(mc, serverRate, serverBurst, remote, allowPrivate, tc)
 }
 
 // serveV2 是 v2 的老流程：等 CONNECT 帧 → 拨目标 → 双向转发。
 // v3 不走这里（v3 没有 CONNECT 帧，流头在 yamux 流里）。
-func serveV2(mc *mmx.Conn, serverRate, serverBurst int64, remote string, allowPrivate bool) {
+func serveV2(mc *mmx.Conn, serverRate, serverBurst int64, remote string, allowPrivate bool, tc *mmx.TrafficCounter) {
 	// 等 CONNECT 帧
 	ftype, payload, err := mc.ReadFrame()
 	if err != nil {
@@ -733,15 +855,15 @@ func serveV2(mc *mmx.Conn, serverRate, serverBurst int64, remote string, allowPr
 	// 任一方向结束（对端关闭、出错）就立刻关闭两端连接，
 	// 否则另一方向会一直阻塞读，连接永远挂起。
 	done := make(chan struct{}, 2)
-	go func() { pumpMMXToRaw(mc, targetConn, lim); done <- struct{}{} }()
-	go func() { pumpRawToMMX(targetConn, mc, lim); done <- struct{}{} }()
+	go func() { pumpMMXToRaw(mc, targetConn, lim, tc); done <- struct{}{} }()
+	go func() { pumpRawToMMX(targetConn, mc, lim, tc); done <- struct{}{} }()
 	<-done
 	targetConn.Close()
 	<-done
 	log.Printf("[%s] 连接结束", remote)
 }
 
-func pumpMMXToRaw(mc *mmx.Conn, target net.Conn, lim *mmx.Limiter) {
+func pumpMMXToRaw(mc *mmx.Conn, target net.Conn, lim *mmx.Limiter, tc *mmx.TrafficCounter) {
 	for {
 		ftype, payload, err := mc.ReadFrame()
 		if err != nil {
@@ -754,21 +876,25 @@ func pumpMMXToRaw(mc *mmx.Conn, target net.Conn, lim *mmx.Limiter) {
 			continue
 		}
 		lim.Wait(len(payload)) // 上行限速：客户端发来、要转发给目标的每个字节都过令牌桶
+		tc.Wait(len(payload))  // 超限后 TC 限速才起作用（其余情况直接返回）
 		if _, err := target.Write(payload); err != nil {
 			return
 		}
+		tc.AddIn(int64(len(payload))) // 入站：客户端→服务端→目标
 	}
 }
 
-func pumpRawToMMX(raw net.Conn, mc *mmx.Conn, lim *mmx.Limiter) {
+func pumpRawToMMX(raw net.Conn, mc *mmx.Conn, lim *mmx.Limiter, tc *mmx.TrafficCounter) {
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := raw.Read(buf)
 		if n > 0 {
 			lim.Wait(n) // 下行限速：目标返回、要发给客户端的每个字节都过令牌桶
+			tc.Wait(n)  // 超限后 TC 限速才起作用（其余情况直接返回）
 			if werr := mc.WriteFrame(mmx.FrameData, buf[:n]); werr != nil {
 				return
 			}
+			tc.AddOut(int64(n)) // 出站：目标→服务端→客户端
 		}
 		if err != nil {
 			if err != io.EOF {

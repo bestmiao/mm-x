@@ -86,7 +86,7 @@ func pipeSessionPairVersion(t *testing.T, version int, serverRate, serverBurst i
 			}
 			// 测试目标是本机回显服务（127.0.0.1），目标过滤默认会拒绝，
 			// 这里显式放开（allowPrivate=true）；生产环境不带这个参数。
-			go ServeMuxStream(st, sess, serverRate, serverBurst, "test", true)
+			go ServeMuxStream(st, sess, serverRate, serverBurst, "test", true, nil)
 		}
 	}()
 	cleanup := func() {
