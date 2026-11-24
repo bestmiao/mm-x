@@ -1,9 +1,9 @@
 #!/bin/bash
-# MM-1 v3 VPS 部署验证：UDP 数据面真测（沙箱里 UDP 不通，只能在 VPS 上跑）。
-# 在 VPS 上用（/tmp/mm1-v3/ 里放好新版 mm1-client-linux-amd64 和本脚本）：
-#   MM1_V3_LINK="$(mm --show-link)" bash test/udp-test.sh
+# mm-x v3 VPS 部署验证：UDP 数据面真测（沙箱里 UDP 不通，只能在 VPS 上跑）。
+# 在 VPS 上用（/tmp/mmx-v3/ 里放好新版 mmx-client-linux-amd64 和本脚本）：
+#   MMX_V3_LINK="$(mm --show-link)" bash test/udp-test.sh
 # 或直接把链接存在文件里：
-#   MM1_V3_LINK_FILE=/tmp/mm1-v3/v3-link.txt bash test/udp-test.sh
+#   MMX_V3_LINK_FILE=/tmp/mmx-v3/v3-link.txt bash test/udp-test.sh
 # 链接只从环境/文件读，绝不打印。
 # 验证：① UDP 回显经隧道往返；② 真 DNS 查询 8.8.8.8:53 经隧道拿到应答；
 #      ③ 20 条并行 TCP 流只用 1 次 v3 握手（复用）。
@@ -25,13 +25,13 @@ if [ ! -x "$UDP_TEST" ]; then
   fi
 fi
 
-CLIENT="${MM1_CLIENT:-./mm1-client-linux-amd64}"
-[ -x "$CLIENT" ] || CLIENT="./mm1-client"
-[ -x "$CLIENT" ] || { echo "找不到 mm1-client 二进制（放个新版 mm1-client-linux-amd64 在仓库根目录）"; exit 1; }
+CLIENT="${MMX_CLIENT:-./mmx-client-linux-amd64}"
+[ -x "$CLIENT" ] || CLIENT="./mmx-client"
+[ -x "$CLIENT" ] || { echo "找不到 mmx-client 二进制（放个新版 mmx-client-linux-amd64 在仓库根目录）"; exit 1; }
 
-LINK="${MM1_V3_LINK:-}"
-if [ -z "$LINK" ] && [ -n "${MM1_V3_LINK_FILE:-}" ]; then LINK="$(cat "$MM1_V3_LINK_FILE")"; fi
-[ -n "$LINK" ] || { echo "没给链接：MM1_V3_LINK=... 或 MM1_V3_LINK_FILE=... 再跑"; exit 1; }
+LINK="${MMX_V3_LINK:-}"
+if [ -z "$LINK" ] && [ -n "${MMX_V3_LINK_FILE:-}" ]; then LINK="$(cat "$MMX_V3_LINK_FILE")"; fi
+[ -n "$LINK" ] || { echo "没给链接：MMX_V3_LINK=... 或 MMX_V3_LINK_FILE=... 再跑"; exit 1; }
 
 SOCKS_PORT="${SOCKS_PORT:-18135}"
 HTTP_PORT="${HTTP_PORT:-18182}"
@@ -46,15 +46,15 @@ trap cleanup EXIT
 
 # 本地 HTTP 目标（复用测试用）
 mkdir -p test/www
-[ -f test/www/index.html ] || printf 'Hello MM-1! 这是通过 MM-1 协议拿到的数据。\n' > test/www/index.html
+[ -f test/www/index.html ] || printf 'Hello mm-x! 这是通过 mm-x 协议拿到的数据。\n' > test/www/index.html
 python3 -m http.server "$HTTP_PORT" --directory test/www >/dev/null 2>&1 &
 HTTP_PID=$!
 sleep 1
 
-"$CLIENT" --link "$LINK" --socks-listen "127.0.0.1:$SOCKS_PORT" > /tmp/mm1-v3-udp-client.log 2>&1 &
+"$CLIENT" --link "$LINK" --socks-listen "127.0.0.1:$SOCKS_PORT" > /tmp/mmx-v3-udp-client.log 2>&1 &
 CLI_PID=$!
 sleep 2
-kill -0 $CLI_PID 2>/dev/null || { echo "mm1-client 启动失败，见 /tmp/mm1-v3-udp-client.log"; exit 1; }
+kill -0 $CLI_PID 2>/dev/null || { echo "mmx-client 启动失败，见 /tmp/mmx-v3-udp-client.log"; exit 1; }
 
 echo "--- ①② UDP：回显 + 真 DNS（8.8.8.8:53）经隧道 ---"
 if $UDP_TEST --socks "127.0.0.1:$SOCKS_PORT" --real-dns; then
@@ -64,14 +64,14 @@ else
 fi
 
 echo "--- ③ 复用：20 条并行 TCP 流 ---"
-rm -f /tmp/mm1-v3-mux.ok
+rm -f /tmp/mmx-v3-mux.ok
 PIDS=""
 for i in $(seq 20); do
-  env -u no_proxy -u NO_PROXY curl -s --max-time 15 --socks5 "127.0.0.1:$SOCKS_PORT" "http://127.0.0.1:$HTTP_PORT/index.html" | grep -q "Hello MM-1" && echo ok >> /tmp/mm1-v3-mux.ok &
+  env -u no_proxy -u NO_PROXY curl -s --max-time 15 --socks5 "127.0.0.1:$SOCKS_PORT" "http://127.0.0.1:$HTTP_PORT/index.html" | grep -q "Hello mm-x" && echo ok >> /tmp/mmx-v3-mux.ok &
   PIDS="$PIDS $!"
 done
 for p in $PIDS; do wait $p 2>/dev/null; done
-OKN=$(wc -l < /tmp/mm1-v3-mux.ok 2>/dev/null || echo 0)
+OKN=$(wc -l < /tmp/mmx-v3-mux.ok 2>/dev/null || echo 0)
 [ "$OKN" = 20 ] && ok "20 条并行流全通（$OKN/20）" || bad "并行流只通 $OKN/20"
 
 echo "================ 结果 ================"

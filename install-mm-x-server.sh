@@ -1,28 +1,28 @@
 #!/bin/bash
 # mm-x 服务端一键部署脚本（在 VPS 上用 sudo 运行）。
 # 用法：
-#   1) 把本脚本和预编译的 mm1-server-linux-amd64 传到 VPS 同一个目录（例如 /tmp/mm1/）；
+#   1) 把本脚本和预编译的 mmx-server-linux-amd64 传到 VPS 同一个目录（例如 /tmp/mmx/）；
 #   2) sudo ./install-mm-x-server.sh [--port 端口] [--rate 限速] [--burst 突发] [--name 节点名] [--host 公网IP或域名]
 #      [--fallback site|silent] [--tls-domain 域名 --tls-cert 证书 --tls-key 私钥]
 #      [--tls-auto [--tls-sni 域名]]（没域名时用自签 TLS + SPKI 锁定，和真 TLS 二选一）
 # 默认：随机高位端口（10000-60000）、限速 6250K（50 Mbps，约 6.25 MB/s，1080p、4K30、4K60 都能看）、突发 0（严格模式：任何时候都不超过限速；旧默认 15M 会让每条新连接开头先冲 15MB 再限速，实测 30MB 文件平均跑到 96 Mbps、峰值 1300 Mbps，等于没限——YouTube 这种多连接、分段取数据的流量，每段都落在突发里，更是全程不限）。
-# 脚本会：装二进制到 /usr/local/bin/mm1-server；生成/保留 /etc/mm1/psk（重装不换密钥，
+# 脚本会：装二进制到 /usr/local/bin/mmx-server；生成/保留 /etc/mmx/psk（重装不换密钥，
 #   旧密钥靠服务端的 24 小时宽限期继续用）；默认开 BBR（开不了只警告）；放行防火墙端口；
-#   写 /etc/mm1/config（全部参数都在这里，菜单改参数就改这个文件）；写 systemd 服务
+#   写 /etc/mmx/config（全部参数都在这里，菜单改参数就改这个文件）；写 systemd 服务
 #   （开机自启、崩溃自动重启）；装管理菜单 /usr/local/bin/mm（输入 mm 呼出）。
-# 安装完不打印 mm:// 链接——链接在 mm 菜单第 1 项里看。
+# 安装完不打印 mmx:// 链接——链接在 mm 菜单第 1 项里看。
 # 重装/更新：直接再跑一次本脚本即可，密钥文件不动，服务会自动重启加载新二进制。
 set -euo pipefail
 
-# 测试钩子：MM1_TEST_ROOT 设置时，所有路径都改到该目录下（不碰真实系统），
+# 测试钩子：MMX_TEST_ROOT 设置时，所有路径都改到该目录下（不碰真实系统），
 # BBR 步骤跳过；systemctl/journalctl/ss 由测试替身提供。生产环境不要设置这个变量。
-ROOT="${MM1_TEST_ROOT:-}"
-CFG_DIR="$ROOT/etc/mm1"
+ROOT="${MMX_TEST_ROOT:-}"
+CFG_DIR="$ROOT/etc/mmx"
 CFG_FILE="$CFG_DIR/config"
 PSK_FILE="$CFG_DIR/psk"
 BIN_DIR="$ROOT/usr/local/bin"
 UNIT_DIR="$ROOT/etc/systemd/system"
-UNIT_FILE="$UNIT_DIR/mm1-server.service"
+UNIT_FILE="$UNIT_DIR/mmx-server.service"
 
 PORT=""
 RATE="6250K"
@@ -49,16 +49,16 @@ usage() {
   echo "  --rate   服务端限速上限，默认 6250K（50 Mbps，约 6.25 MB/s；0 = 不限速）"
   echo "  --burst  服务端突发额度上限，默认 0（严格模式：任何时候都不超过限速；想允许开头冲一把再填，例如 --burst 5M）"
   echo "  --name   节点名，默认 mm-x"
-  echo "  --host   mm:// 链接里的服务器地址，默认自动探测公网 IP；可以填域名或 IP，填了域名就按域名生成链接"
-  echo "  --bin    服务端二进制路径，默认用脚本同目录下的 mm1-server-linux-amd64"
+  echo "  --host   mmx:// 链接里的服务器地址，默认自动探测公网 IP；可以填域名或 IP，填了域名就按域名生成链接"
+  echo "  --bin    服务端二进制路径，默认用脚本同目录下的 mmx-server-linux-amd64"
   echo "  --whitelist-ip   拉黑白名单 IP（可重复写多个）：白名单里的 IP 永远不拉黑；"
   echo "                   用 realm 中转流量时，把 realm 中转机的出口 IP 写进来，否则它一旦握手失败就可能被拉黑断流"
-  echo "  --whitelist-file 拉黑白名单文件路径（每行一个 IP）：会复制到 /etc/mm1/whitelist，写进服务启动参数"
+  echo "  --whitelist-file 拉黑白名单文件路径（每行一个 IP）：会复制到 /etc/mmx/whitelist，写进服务启动参数"
   echo "  --allow-ip       连接白名单 IP 或 CIDR 段（可重复写多个，例如 --allow-ip 1.2.3.4 --allow-ip 5.6.7.0/24）："
   echo "                   填了就只允许这些 IP 连接落地机，其他 IP 在握手前直接丢弃；不填 = 谁都能连（仍要过密钥校验）"
   echo "                   填你自己的 VPS 入口 IP、realm 中转机 IP；入口是机场节点时别填单个 IP——机场出口 IP 会变、还可能是多人共用，"
   echo "                   容易把自己挡住，填机场出口 IP 段（CIDR）或入口改用自己的 VPS"
-  echo "  --allowlist-file 连接白名单文件路径（每行一个 IP 或 CIDR）：会复制到 /etc/mm1/allowlist，写进服务启动参数"
+  echo "  --allowlist-file 连接白名单文件路径（每行一个 IP 或 CIDR）：会复制到 /etc/mmx/allowlist，写进服务启动参数"
   echo "  --fallback       非 mm-x 连接的回退方式，默认 site：site = 回一个像网站的页面/400 页（探测看到一台普通 Web 服务器）；"
   echo "                   silent = 0 字节回包、直接断开（老样子，更隐蔽但探测者会觉得端口是死的）"
   echo "  --tls-domain     真 TLS 模式的域名：填了就开启真 TLS 包装，流量看起来就是正常 HTTPS 访问这个网站；"
@@ -67,8 +67,8 @@ usage() {
   echo "  --tls-key        真 TLS 模式的私钥文件（privkey.pem）"
   echo "                   没有证书时先申请 Let's Encrypt：apt install certbot -y && certbot certonly --standalone -d 你的域名"
   echo "                   （证书一般在 /etc/letsencrypt/live/你的域名/fullchain.pem 和 privkey.pem）"
-  echo "  --tls-auto       自签 TLS 模式（没域名时用）：首次启动自动生成自签证书并存到 /etc/mm1/tls-cert.pem 和"
-  echo "                   /etc/mm1/tls-key.pem；客户端靠 mm:// 链接里的 pin（SPKI 指纹）锁定验证，不跳过验证。"
+  echo "  --tls-auto       自签 TLS 模式（没域名时用）：首次启动自动生成自签证书并存到 /etc/mmx/tls-cert.pem 和"
+  echo "                   /etc/mmx/tls-key.pem；客户端靠 mmx:// 链接里的 pin（SPKI 指纹）锁定验证，不跳过验证。"
   echo "                   和 --tls-domain 二选一；以后有了域名再用菜单第 7 项换成真 TLS"
   echo "  --tls-sni        自签 TLS 的默认 SNI（一个常见域名，例如 www.microsoft.com，默认就是它）；"
   echo "                   链接里写了 sni 参数就以链接为准"
@@ -150,14 +150,14 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -z "$BIN" ]; then
-  if [ -f "$SCRIPT_DIR/mm1-server-linux-amd64" ]; then
-    BIN="$SCRIPT_DIR/mm1-server-linux-amd64"
-  elif [ -f "$SCRIPT_DIR/mm1-server" ]; then
-    BIN="$SCRIPT_DIR/mm1-server"
-  elif [ -x "$BIN_DIR/mm1-server" ]; then
-    BIN="$BIN_DIR/mm1-server"  # 更新模式：只重装服务配置，不换二进制
+  if [ -f "$SCRIPT_DIR/mmx-server-linux-amd64" ]; then
+    BIN="$SCRIPT_DIR/mmx-server-linux-amd64"
+  elif [ -f "$SCRIPT_DIR/mmx-server" ]; then
+    BIN="$SCRIPT_DIR/mmx-server"
+  elif [ -x "$BIN_DIR/mmx-server" ]; then
+    BIN="$BIN_DIR/mmx-server"  # 更新模式：只重装服务配置，不换二进制
   else
-    echo "找不到服务端二进制：请把 mm1-server-linux-amd64 和本脚本放在同一个目录再运行，"
+    echo "找不到服务端二进制：请把 mmx-server-linux-amd64 和本脚本放在同一个目录再运行，"
     echo "或用 --bin 指定二进制路径。"
     exit 1
   fi
@@ -172,14 +172,14 @@ echo "端口：$PORT；限速：$RATE；突发：$BURST；节点名：$NAME；�
 
 # 1) 装二进制（更新模式下 BIN 就是已安装的文件，跳过自复制）
 mkdir -p "$BIN_DIR"
-if [ "$BIN" != "$BIN_DIR/mm1-server" ]; then
-  install -m 755 "$BIN" "$BIN_DIR/mm1-server"
-  echo "二进制已安装：$BIN_DIR/mm1-server"
+if [ "$BIN" != "$BIN_DIR/mmx-server" ]; then
+  install -m 755 "$BIN" "$BIN_DIR/mmx-server"
+  echo "二进制已安装：$BIN_DIR/mmx-server"
 else
   echo "更新模式：二进制已在安装位置，不重复安装"
 fi
 
-# 2) 密钥：/etc/mm1/psk 没有就生成（64 位十六进制，32 字节），有了就保留——
+# 2) 密钥：/etc/mmx/psk 没有就生成（64 位十六进制，32 字节），有了就保留——
 #    重装/更新不换密钥，轮换密钥请用 mm 菜单第 4 项（服务端 24 小时宽限期内新旧密钥都能用）
 mkdir -p "$CFG_DIR"
 if [ -f "$PSK_FILE" ]; then
@@ -196,7 +196,7 @@ fi
 
 # 3) BBR 默认开：开不了只警告，绝不因为开不了就装失败（测试模式跳过）
 echo "== 开启 BBR =="
-if [ -n "${MM1_TEST_ROOT:-}" ]; then
+if [ -n "${MMX_TEST_ROOT:-}" ]; then
   echo "测试模式：跳过 BBR"
 else
   BBR_OK=0
@@ -227,7 +227,7 @@ else
   echo "警告：没找到 ufw/firewall-cmd，请在云服务商的安全组 / 防火墙里手动放行 $PORT/tcp，否则连不上"
 fi
 
-# 5) 拉黑白名单：--whitelist-ip（可重复）写进启动参数；--whitelist-file 复制到 /etc/mm1/whitelist 再写进启动参数
+# 5) 拉黑白名单：--whitelist-ip（可重复）写进启动参数；--whitelist-file 复制到 /etc/mmx/whitelist 再写进启动参数
 WHITELIST_FILE_INSTALLED=""
 if [ -n "$WHITELIST_FILE" ]; then
   if [ ! -f "$WHITELIST_FILE" ]; then echo "拉黑白名单文件不存在：$WHITELIST_FILE"; exit 1; fi
@@ -236,7 +236,7 @@ if [ -n "$WHITELIST_FILE" ]; then
   echo "拉黑白名单文件已安装：$CFG_DIR/whitelist（重装脚本时不会被覆盖，除非再传 --whitelist-file）"
 fi
 
-# 5b) 连接白名单：--allow-ip（可重复，IP 或 CIDR）写进启动参数；--allowlist-file 复制到 /etc/mm1/allowlist 再写进启动参数
+# 5b) 连接白名单：--allow-ip（可重复，IP 或 CIDR）写进启动参数；--allowlist-file 复制到 /etc/mmx/allowlist 再写进启动参数
 ALLOWLIST_FILE_INSTALLED=""
 if [ -n "$ALLOWLIST_FILE" ]; then
   if [ ! -f "$ALLOWLIST_FILE" ]; then echo "连接白名单文件不存在：$ALLOWLIST_FILE"; exit 1; fi
@@ -261,7 +261,7 @@ if [ -z "$HOST" ]; then
   HOST=""
 fi
 
-# 7) 写配置文件 /etc/mm1/config：全部参数都在这里，菜单改参数就改这个文件，
+# 7) 写配置文件 /etc/mmx/config：全部参数都在这里，菜单改参数就改这个文件，
 #    再由菜单按它重新生成 systemd 服务（改错了重启失败会自动回滚）。
 WHITELIST_IPS_STR="${WHITELIST_IPS[*]:-}"
 ALLOW_IPS_STR="${ALLOW_IPS[*]:-}"
@@ -272,7 +272,7 @@ chmod 600 "$CFG_FILE"
 echo "配置文件已写入：$CFG_FILE"
 
 # 8) 写管理菜单 /usr/local/bin/mm：输入 mm 呼出。
-#    菜单是一个独立的 bash 脚本；配置存在 /etc/mm1/config，密钥在 /etc/mm1/psk，
+#    菜单是一个独立的 bash 脚本；配置存在 /etc/mmx/config，密钥在 /etc/mmx/psk，
 #    systemd 服务由菜单按配置文件生成（改参数后自动重载 + 重启，重启失败自动回滚）。
 echo "== 安装管理菜单 =="
 cat > "$BIN_DIR/mm" <<'MM_MENU_EOF'
@@ -281,7 +281,7 @@ cat > "$BIN_DIR/mm" <<'MM_MENU_EOF'
 # 功能：1 显示协议链接  2 查看服务状态  3 重启服务  4 更换密钥  5 修改限速
 #       6 查看最近日志  7 诱饵回退 / TLS 设置（真 TLS、自签 TLS、查指纹）  8 修改服务启动参数
 #       9 修改快捷命令  10 卸载  11 退出
-# 全部配置存在 /etc/mm1/config，密钥在 /etc/mm1/psk；
+# 全部配置存在 /etc/mmx/config，密钥在 /etc/mmx/psk；
 # systemd 服务由本脚本按配置文件生成，改参数后自动重载 + 重启，
 # 重启失败自动回滚到改之前的配置，不会让服务起不来。
 # 隐藏用法（给部署脚本和脚本调用）：mm --write-service（按配置写服务文件）、mm --show-link [plain|opaque]（只打印链接，
@@ -289,14 +289,14 @@ cat > "$BIN_DIR/mm" <<'MM_MENU_EOF'
 # mm --show-pin（只打印 TLS 证书的 SPKI 指纹）。
 set -u
 
-ROOT="${MM1_TEST_ROOT:-}"
-CFG_DIR="$ROOT/etc/mm1"
+ROOT="${MMX_TEST_ROOT:-}"
+CFG_DIR="$ROOT/etc/mmx"
 CFG_FILE="$CFG_DIR/config"
 PSK_FILE="$CFG_DIR/psk"
 BIN_DIR="$ROOT/usr/local/bin"
-SERVER_BIN="$BIN_DIR/mm1-server"
+SERVER_BIN="$BIN_DIR/mmx-server"
 UNIT_DIR="$ROOT/etc/systemd/system"
-UNIT_FILE="$UNIT_DIR/mm1-server.service"
+UNIT_FILE="$UNIT_DIR/mmx-server.service"
 MYNAME="$(basename "$0")"
 
 # 默认值（配置文件缺失时用）
@@ -327,7 +327,7 @@ write_service() {
     tls_args=" --tls-domain $TLS_DOMAIN --tls-cert $TLS_CERT --tls-key $TLS_KEY"
   elif [ "${TLS_AUTO:-0}" = "1" ]; then
     # 自签模式：证书路径必须写绝对路径——服务端不给路径时默认相对路径 tls-cert.pem，
-    # systemd 下工作目录是 /，会写到根目录去，所以这里固定写 /etc/mm1 下。
+    # systemd 下工作目录是 /，会写到根目录去，所以这里固定写 /etc/mmx 下。
     tls_args=" --tls-auto --tls-cert $CFG_DIR/tls-cert.pem --tls-key $CFG_DIR/tls-key.pem"
     if [ -n "${TLS_SNI:-}" ]; then tls_args="$tls_args --tls-sni $TLS_SNI"; fi
   fi
@@ -367,7 +367,7 @@ apply_config() {
   save_config
   write_service
   systemctl daemon-reload 2>/dev/null || true
-  if systemctl restart mm1-server 2>/dev/null && systemctl is-active --quiet mm1-server 2>/dev/null; then
+  if systemctl restart mmx-server 2>/dev/null && systemctl is-active --quiet mmx-server 2>/dev/null; then
     rm -f "$CFG_FILE.bak" "$UNIT_FILE.bak"
     echo "已生效：$desc，服务已重启并正常运行"
     return 0
@@ -377,11 +377,11 @@ apply_config() {
   cp -f "$UNIT_FILE.bak" "$UNIT_FILE" 2>/dev/null || true
   load_config
   systemctl daemon-reload 2>/dev/null || true
-  systemctl restart mm1-server 2>/dev/null || true
-  if systemctl is-active --quiet mm1-server 2>/dev/null; then
+  systemctl restart mmx-server 2>/dev/null || true
+  if systemctl is-active --quiet mmx-server 2>/dev/null; then
     echo "已回滚：服务用原配置恢复运行。请检查输入的参数再改。"
   else
-    echo "回滚后服务仍未运行！请手动检查：systemctl status mm1-server；日志：journalctl -u mm1-server -n 50"
+    echo "回滚后服务仍未运行！请手动检查：systemctl status mmx-server；日志：journalctl -u mmx-server -n 50"
   fi
   return 1
 }
@@ -412,7 +412,7 @@ port_in_use() {
   ss -tln 2>/dev/null | grep -q ":$1[[:space:]]"
 }
 
-# 1) 显示协议链接：从配置文件读密钥现拼（mm1-server --print-link）；
+# 1) 显示协议链接：从配置文件读密钥现拼（mmx-server --print-link）；
 #    密钥文件没有就先生成一个再拼。安装完不打印链接，就是为了让链接只在这里出现。
 #    用法：show_link [plain|opaque]，默认 plain（短格式）；opaque 是一串乱码，
 #    只有新版客户端能认——交互菜单里永远打 plain，要 opaque 用 mm --show-link opaque。
@@ -431,7 +431,7 @@ show_link() {
     if command -v openssl >/dev/null 2>&1; then openssl rand -hex 32 > "$PSK_FILE";
     else od -An -tx1 -N 32 /dev/urandom | tr -d ' \n' > "$PSK_FILE"; fi
     chmod 600 "$PSK_FILE"
-    systemctl restart mm1-server 2>/dev/null || true
+    systemctl restart mmx-server 2>/dev/null || true
   fi
   local psk host link
   psk="$(cat "$PSK_FILE")"
@@ -477,12 +477,12 @@ show_pin() {
 # 2) 查看服务状态
 show_status() {
   load_config
-  if systemctl is-active --quiet mm1-server 2>/dev/null; then
+  if systemctl is-active --quiet mmx-server 2>/dev/null; then
     echo "服务状态：正在运行"
   else
     echo "服务状态：未运行（用第 3 项重启，或看第 6 项日志找原因）"
   fi
-  systemctl status mm1-server --no-pager 2>&1 | head -20 || true
+  systemctl status mmx-server --no-pager 2>&1 | head -20 || true
   if command -v ss >/dev/null 2>&1 && [ -n "$PORT" ]; then
     if port_in_use "$PORT"; then echo "端口 $PORT 正在监听"; else echo "端口 $PORT 没在监听"; fi
   fi
@@ -490,15 +490,15 @@ show_status() {
 
 # 3) 重启服务
 restart_svc() {
-  if systemctl restart mm1-server 2>/dev/null && systemctl is-active --quiet mm1-server 2>/dev/null; then
+  if systemctl restart mmx-server 2>/dev/null && systemctl is-active --quiet mmx-server 2>/dev/null; then
     echo "重启成功，服务正在运行"
   else
-    echo "重启失败！请看第 6 项日志：journalctl -u mm1-server -n 50"
+    echo "重启失败！请看第 6 项日志：journalctl -u mmx-server -n 50"
     return 1
   fi
 }
 
-# 4) 更换密钥：写新密钥进 /etc/mm1/psk，服务端按 24 小时宽限期自动识别新密钥，
+# 4) 更换密钥：写新密钥进 /etc/mmx/psk，服务端按 24 小时宽限期自动识别新密钥，
 #    不用重启；旧链接 24 小时内仍能用，之后作废。
 rotate_key() {
   load_config
@@ -536,14 +536,14 @@ change_rate() {
 # 6) 查看最近日志
 show_logs() {
   if command -v journalctl >/dev/null 2>&1; then
-    journalctl -u mm1-server -n 50 --no-pager 2>&1 || echo "读日志失败"
+    journalctl -u mmx-server -n 50 --no-pager 2>&1 || echo "读日志失败"
   else
-    echo "没有 journalctl，请直接看：systemctl status mm1-server"
+    echo "没有 journalctl，请直接看：systemctl status mmx-server"
   fi
 }
 
 # 7) 诱饵回退 / TLS 设置：真 TLS（有域名）和自签 TLS（没域名）二选一；
-#    自签证书首次启动自动生成并存到 /etc/mm1/tls-cert.pem、tls-key.pem，
+#    自签证书首次启动自动生成并存到 /etc/mmx/tls-cert.pem、tls-key.pem，
 #    客户端靠链接里的 pin（SPKI 指纹）锁定验证；换证书要重新生成链接（第 1 项）。
 tls_menu() {
   while true; do
@@ -608,7 +608,7 @@ tls_menu() {
         case "$sni" in ""|"www.microsoft.com") TLS_SNI="";; *) TLS_SNI="$sni";; esac
         TLS_AUTO="1"
         apply_config "开启自签 TLS（SNI ${TLS_SNI:-www.microsoft.com}）"
-        echo "证书首次启动自动生成，存在 /etc/mm1/tls-cert.pem 和 tls-key.pem；"
+        echo "证书首次启动自动生成，存在 /etc/mmx/tls-cert.pem 和 tls-key.pem；"
         echo "链接里的 pin 就是证书指纹（第 1 项的链接已带上，换了证书要重新生成链接）。"
         ;;
       5)
@@ -748,7 +748,7 @@ rename_cmd() {
     ""|*[!a-zA-Z0-9_-]*) echo "名字不合法：只能用字母、数字、下划线、短横线"; return 1;;
   esac
   if [ "$new" = "$MYNAME" ]; then echo "新名字和现在一样，没改。"; return 0; fi
-  if [ "$new" = "mm1-server" ] || [ "$new" = "mm1-client" ]; then
+  if [ "$new" = "mmx-server" ] || [ "$new" = "mmx-client" ]; then
     echo "这个名字是 mm-x 自己的程序名，不能用"; return 1
   fi
   if command -v "$new" >/dev/null 2>&1 || [ -e "$BIN_DIR/$new" ] || [ -e "/usr/bin/$new" ] || [ -e "/bin/$new" ]; then
@@ -768,13 +768,13 @@ rename_cmd() {
 # 10) 卸载：停服务、删服务文件、删程序、删菜单命令、删配置（含密钥）；BBR 设置保留。
 uninstall() {
   load_config
-  echo "要卸载 mm-x 服务端，将删除：服务 mm1-server、程序 $SERVER_BIN、菜单命令 $BIN_DIR/$MYNAME、配置 $CFG_DIR（含密钥）。"
+  echo "要卸载 mm-x 服务端，将删除：服务 mmx-server、程序 $SERVER_BIN、菜单命令 $BIN_DIR/$MYNAME、配置 $CFG_DIR（含密钥）。"
   echo "BBR 内核设置会保留（对系统无害）。"
   local yn
   read -r -p "确认卸载吗？输入 y 确认： " yn || return 0
   case "$yn" in y|Y) ;; *) echo "已取消。"; return 0;; esac
-  systemctl stop mm1-server 2>/dev/null || true
-  systemctl disable mm1-server 2>/dev/null || true
+  systemctl stop mmx-server 2>/dev/null || true
+  systemctl disable mmx-server 2>/dev/null || true
   rm -f "$UNIT_FILE"
   systemctl daemon-reload 2>/dev/null || true
   if command -v ufw >/dev/null 2>&1 && [ -n "$PORT" ]; then ufw delete allow "$PORT/tcp" >/dev/null 2>&1 || true; fi
@@ -798,7 +798,7 @@ main() {
     local tls_desc="关"
     [ -n "$TLS_DOMAIN" ] && tls_desc="真 TLS（$TLS_DOMAIN）"
     [ "${TLS_AUTO:-0}" = "1" ] && tls_desc="自签 TLS（SNI ${TLS_SNI:-www.microsoft.com}）"
-    if systemctl is-active --quiet mm1-server 2>/dev/null; then
+    if systemctl is-active --quiet mmx-server 2>/dev/null; then
       echo "服务：正在运行　端口：${PORT:-?}　限速：${RATE:-?}　突发：${BURST:-?}　回退：${FALLBACK:-?}　TLS：$tls_desc"
     else
       echo "服务：未运行（用第 3 项重启，或看第 6 项日志）　端口：${PORT:-?}　限速：${RATE:-?}"
@@ -844,13 +844,13 @@ echo "== 写入 systemd 服务 =="
 "$BIN_DIR/mm" --write-service
 mkdir -p "$UNIT_DIR"
 systemctl daemon-reload
-systemctl enable mm1-server >/dev/null 2>&1
-systemctl restart mm1-server
+systemctl enable mmx-server >/dev/null 2>&1
+systemctl restart mmx-server
 sleep 2
-if systemctl is-active --quiet mm1-server; then
-  echo "服务已启动：mm1-server 正在运行"
+if systemctl is-active --quiet mmx-server; then
+  echo "服务已启动：mmx-server 正在运行"
 else
-  echo "服务启动失败，请看日志：journalctl -u mm1-server -n 50"
+  echo "服务启动失败，请看日志：journalctl -u mmx-server -n 50"
   exit 1
 fi
 
@@ -861,6 +861,6 @@ echo "限速上限：$RATE（0 = 不限速），突发额度：$BURST"
 echo "回退模式：$FALLBACK；TLS：$TLS_MODE_DESC"
 echo "密钥文件：$PSK_FILE（重装不换密钥；轮换密钥：mm 菜单第 4 项，24 小时内新旧密钥都能用）"
 echo "配置文件：$CFG_FILE（菜单改参数就改这个文件）"
-echo "服务状态：mm 菜单第 2 项，或 systemctl status mm1-server；日志：mm 菜单第 6 项，或 journalctl -u mm1-server -f"
+echo "服务状态：mm 菜单第 2 项，或 systemctl status mmx-server；日志：mm 菜单第 6 项，或 journalctl -u mmx-server -f"
 echo ""
 echo "输入 mm 打开管理菜单，在菜单第 1 项查看协议链接（粘贴到 MM 客户端就能用，绝不要分享给第二个人）。"

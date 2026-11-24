@@ -1,4 +1,4 @@
-// socks-udp-test：经 mm1-client 的 SOCKS5 UDP ASSOCIATE 做
+// socks-udp-test：经 mmx-client 的 SOCKS5 UDP ASSOCIATE 做
 // UDP 端到端测试（回显 + DNS 形状查询）。
 // 自己起一个 UDP 回显服务和一个假 DNS 服务（任意查询都回一个
 // 固定 A 记录），再经隧道发数据报过去、验回包。
@@ -16,7 +16,7 @@ import (
 )
 
 func main() {
-	socksAddr := flag.String("socks", "", "mm1-client 的 SOCKS5 监听地址（必填）")
+	socksAddr := flag.String("socks", "", "mmx-client 的 SOCKS5 监听地址（必填）")
 	realDNS := flag.Bool("real-dns", false, "DNS 测试改查真实 8.8.8.8:53（VPS 部署验证用；默认查本地假 DNS）")
 	flag.Parse()
 	if *socksAddr == "" {
