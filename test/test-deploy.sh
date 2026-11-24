@@ -1,5 +1,5 @@
 #!/bin/bash
-# MM-1 部署脚本 + mm 菜单测试：在沙箱里用替身命令模拟 systemd，
+# mm-x 部署脚本 + mm 菜单测试：在沙箱里用替身命令模拟 systemd，
 # 验证：装完不打印链接、mm 菜单每项能跑通、改参数重启失败会回滚、改名生效。
 # 用法：bash test/test-deploy.sh
 set -u
@@ -95,14 +95,14 @@ export PATH="$TEST_ROOT/usr/local/bin:$STUB_BIN:$PATH"
 note "编译服务端二进制（当前源码，v3）"
 $GO build -o "$SRC_DIR/mm1-server-linux-amd64" ./cmd/mm1-server || { echo "编译失败"; exit 1; }
 ok "编译通过"
-cp install-mm1-server.sh "$SRC_DIR/"
+cp install-mm-x-server.sh "$SRC_DIR/"
 cp "$SRC_DIR/mm1-server-linux-amd64" "$SRC_DIR/mm1-server" 2>/dev/null || true
 
 note "部署脚本 --help 里有 443 说明"
-bash "$SRC_DIR/install-mm1-server.sh" --help 2>&1 | grep -q "443" && ok "--help 提到 443（更像 HTTPS、被占怎么办）" || bad "--help 没提 443"
+bash "$SRC_DIR/install-mm-x-server.sh" --help 2>&1 | grep -q "443" && ok "--help 提到 443（更像 HTTPS、被占怎么办）" || bad "--help 没提 443"
 
 note "测试1：跑部署脚本（--port 18130）"
-bash "$SRC_DIR/install-mm1-server.sh" --port 18130 --name 测试节点 > "$TEST_ROOT/deploy.log" 2>&1
+bash "$SRC_DIR/install-mm-x-server.sh" --port 18130 --name 测试节点 > "$TEST_ROOT/deploy.log" 2>&1
 DEPLOY_CODE=$?
 [ "$DEPLOY_CODE" = 0 ] && ok "部署脚本退出码 0" || bad "部署脚本退出码 $DEPLOY_CODE（见 deploy.log）"
 if grep -q "mm://" "$TEST_ROOT/deploy.log"; then bad "部署输出里打印了 mm:// 链接（应该只在菜单里看）"; else ok "部署输出里没有 mm:// 链接"; fi
@@ -205,7 +205,7 @@ has "$UNIT" "0.0.0.0:18132" && ! grep -q "0.0.0.0:18133" "$UNIT" && ok "回滚�
 
 note "测试12：部署时端口被占直接失败（--port 18140）"
 echo "18140" > "$TEST_ROOT/ss-busy-ports"
-bash "$SRC_DIR/install-mm1-server.sh" --port 18140 > "$TEST_ROOT/deploy-busy.log" 2>&1
+bash "$SRC_DIR/install-mm-x-server.sh" --port 18140 > "$TEST_ROOT/deploy-busy.log" 2>&1
 [ "$?" != 0 ] && grep -q "已被别的服务占用" "$TEST_ROOT/deploy-busy.log" && ok "部署时占用端口报错退出" || bad "部署时占用端口没报错"
 rm -f "$TEST_ROOT/ss-busy-ports"
 
