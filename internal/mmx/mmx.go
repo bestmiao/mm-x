@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"math/big"
 	"net"
 	"net/url"
 	"regexp"
@@ -46,10 +47,16 @@ const (
 	//（填充长度字段从 1 字节改 2 字节）、会话重协商（定期换会话密钥，
 	// 不断流）、TLS 记录版本号改 0x03 0x03（TLS 1.2，真流量就这样）。
 	// 服务端同时接受 v2、v3 和 v4 握手，老 v2/v3 链接不用换。
-	Version   = 4
+	// v5（当前版本）：v4 的复用 + 流量形态伪装——SNI 每会话轮换、
+	// 帧填充按载荷尺寸分级、分片上限每会话连续随机、握手尺寸峰形分布、
+	// 空闲掩护流量、keepalive/重协商时序随机化、客户端会话轮换。
+	// 服务端同时接受 v2、v3、v4 和 v5 握手，老链接不用换；v5 的发送端
+	// 行为只影响本端写出的字节分布，接收方不依赖它，所以新旧互通。
+	Version   = 5
 	VersionV2 = 2
 	VersionV3 = 3
 	VersionV4 = 4
+	VersionV5 = 5
 	saltLen   = 8
 	magicLen  = 3
 
@@ -59,6 +66,7 @@ const (
 	FrameClose   = 0x03
 	FrameAck     = 0x04 // payload: 0x00 成功 / 0x01 失败 + 错误文本
 	FrameRekey   = 0x05 // payload: 32 字节重协商种子（v4：定期换会话密钥）
+	FrameChaff   = 0x06 // payload: 随机掩护字节（v5：空闲时发的假流量，接收方直接丢弃）
 )
 
 // IsMuxVersion 是不是复用版本（v3/v4）：握手之后跑 yamux 会话。
@@ -139,7 +147,7 @@ func effectiveObfs(version int, obfs string) string {
 	return "tls-fake"
 }
 
-// 不透明链接（乱码式）的 blob 常量（见 PROTOCOL.md“mmx:// 不透明链接格式”一节）。
+// 不透明链接（乱码式）的 blob 常量（布局见本文件 parseOpaqueLink 的注释）。
 const (
 	opaqueMagic       = "MMX1" // blob 魔数（4 字节）
 	opaqueBlobVersion = 0x01   // blob 格式版本（和协议 ver 2/3 是两回事）
@@ -171,7 +179,7 @@ const (
 // ver=3 默认 tls，ver=2 / 没写默认 tls-fake；rate 不写 = 不限速
 // （最终以服务端为准）；burst 不写 = 默认 5MB；sni 不写 =
 // www.microsoft.com（拨号时 ResolveSNI 决定）；#名字不写 = mm-x。
-// 完整格式照常解析（向后兼容）。ver=3/4 + obfs=tls 的链接必须带 pin
+// 完整格式照常解析（向后兼容）。ver=3/4/5 + obfs=tls 的链接必须带 pin
 // （证书指纹锁定不可跳过），缺 pin 直接报错。
 // stripLinkScheme 去掉链接前缀，返回前缀后的部分；
 // 新前缀 mmx:// 和旧前缀 mm:// 都接受（旧链接向后兼容）。
@@ -246,8 +254,8 @@ func ParseLink(s string) (*LinkConfig, error) {
 	// ver 先解析：obfs 的默认值由版本决定。
 	if v := q.Get("ver"); v != "" {
 		ver, err := strconv.Atoi(v)
-		if err != nil || (ver != VersionV2 && ver != VersionV3 && ver != VersionV4) {
-			return nil, fmt.Errorf("版本号不受支持：%q，原型只支持 ver=%d、ver=%d 或 ver=%d", v, VersionV2, VersionV3, VersionV4)
+		if err != nil || (ver != VersionV2 && ver != VersionV3 && ver != VersionV4 && ver != VersionV5) {
+			return nil, fmt.Errorf("版本号不受支持：%q，原型只支持 ver=%d、ver=%d、ver=%d 或 ver=%d", v, VersionV2, VersionV3, VersionV4, VersionV5)
 		}
 		cfg.Version = ver
 	}
@@ -310,9 +318,9 @@ func ParseLink(s string) (*LinkConfig, error) {
 }
 
 // BuildLink 生成 mmx:// 链接（短格式，只写非默认参数）。
-// 短格式：mmx://<密钥>@<服务器>:<端口>?ver=4&pin=<SPKI指纹>
-// 省掉的都是默认值：enc=aes-256-gcm 不写；obfs 按版本默认（ver=3/4 是 tls，
-// ver=2 是 tls-fake），只有和版本默认不一致时才写出来（例如明文 v4
+// 短格式：mmx://<密钥>@<服务器>:<端口>?ver=5&pin=<SPKI指纹>
+// 省掉的都是默认值：enc=aes-256-gcm 不写；obfs 按版本默认（ver=3/4/5 是 tls，
+// ver=2 是 tls-fake），只有和版本默认不一致时才写出来（例如明文 v5
 // 要写 obfs=tls-fake）；sni 只有非默认域名时才写（默认 www.microsoft.com
 // 不写）；rate/burst 不写进链接（限速由服务端强制，客户端不需要）；
 // #名字不写（只是显示名，解析时缺了默认 mm-x）。
@@ -343,7 +351,7 @@ func BuildLink(cfg *LinkConfig) string {
 }
 
 // parseOpaqueLink 解析 mmx:// 不透明链接（乱码式）。
-// 布局（见 PROTOCOL.md“mmx:// 不透明链接格式”一节）：
+// 布局：
 // magic MMX1(4) + blob 版本 0x01(1) + PSK(32) + host 类型(1) +
 // host（IPv4 4 / IPv6 16 / 域名 1 字节长度 + UTF-8）+ port 大端(2) +
 // 协议 ver(1) + obfs 标志(1) + SNI 标志(1) + 可选 SNI +
@@ -442,8 +450,8 @@ func parseOpaqueLink(s string) (*LinkConfig, error) {
 		return nil, err
 	}
 	ver := int(verB[0])
-	if ver != VersionV2 && ver != VersionV3 && ver != VersionV4 {
-		return nil, fmt.Errorf("版本号不受支持：%d，原型只支持 ver=%d、ver=%d 或 ver=%d", ver, VersionV2, VersionV3, VersionV4)
+	if ver != VersionV2 && ver != VersionV3 && ver != VersionV4 && ver != VersionV5 {
+		return nil, fmt.Errorf("版本号不受支持：%d，原型只支持 ver=%d、ver=%d、ver=%d 或 ver=%d", ver, VersionV2, VersionV3, VersionV4, VersionV5)
 	}
 	obfsB, err := read(1)
 	if err != nil {
@@ -630,7 +638,7 @@ func LooksLikeMMXHandshake(payload []byte, keys [][]byte) int {
 	salt := payload[:saltLen]
 	want := payload[saltLen : saltLen+3]
 	for _, psk := range keys {
-		for _, ver := range []int{VersionV4, VersionV3, VersionV2} {
+		for _, ver := range []int{VersionV5, VersionV4, VersionV3, VersionV2} {
 			if subtle.ConstantTimeCompare(magicBytes(psk, salt, ver), want) == 1 {
 				return ver
 			}
@@ -642,10 +650,38 @@ func LooksLikeMMXHandshake(payload []byte, keys [][]byte) int {
 // LooksLikeClientHello 判断一段 TLS 记录载荷是不是真实 TLS ClientHello：
 // 握手类型 0x01（ClientHello）+ 客户端版本 TLS 1.0/1.1/1.2（0x03 0x01–0x03）。
 // mm-x 伪装握手的载荷首字节是随机盐，同时满足这两条的概率约 1/1600 万，
-// 万一撞上那次连接会走 TLS 分支然后握手失败、客户端重连即可（见 PROTOCOL.md）。
+// 万一撞上那次连接会走 TLS 分支然后握手失败、客户端重连即可。
 func LooksLikeClientHello(payload []byte) bool {
 	return len(payload) >= 6 && payload[0] == 0x01 &&
 		payload[4] == 0x03 && payload[5] >= 0x01 && payload[5] <= 0x03
+}
+
+// randIntn 返回 [0, n) 内的均匀随机整数（crypto/rand）。
+// 抽样失败时返回 0——调用方把 0 当“无填充/无抖动”处理，发送绝不因此失败。
+func randIntn(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	v, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
+	if err != nil {
+		return 0
+	}
+	return int(v.Int64())
+}
+
+// triangularPadLen 返回 [0, span] 内的三角分布抽样（两个均匀随机数取平均）：
+// 峰值在区间中部、两端收敛。v5 握手填充用它——真实 ClientHello 的尺寸
+// 是聚簇的，不是均匀铺开的。
+func triangularPadLen(span int) (int, error) {
+	a, err := rand.Int(rand.Reader, big.NewInt(int64(span+1)))
+	if err != nil {
+		return 0, err
+	}
+	b, err := rand.Int(rand.Reader, big.NewInt(int64(span+1)))
+	if err != nil {
+		return 0, err
+	}
+	return (int(a.Int64()) + int(b.Int64())) / 2, nil
 }
 
 // handshakePayload 组装/解析握手载荷（v2/v3/v4 共用，区别只在魔数标签和版本字节）：
@@ -669,10 +705,26 @@ func buildHandshakePayload(pub, random, psk []byte, label string, version int, b
 		ver = 0x09 ^ magic[0] // 发一个不受支持的版本号 9（当前只支持 2、3 和 4）
 	}
 	// 握手填充按会话画像抽样（分布因部署、因会话而异）。
+	// v5 不再走画像的平坦映射：填充长度改用三角分布（两个均匀随机数
+	// 取平均），握手包总长集中在 470–540 字节附近——真实 ClientHello
+	// 的尺寸是聚簇的，不是 400–600 上均匀铺开的，平坦分布本身也是特征。
 	profile := DeriveSessionProfile(psk, salt)
 	var padLen int
 	var padLenField []byte
-	if version >= VersionV4 {
+	if version >= VersionV5 {
+		if n, err := triangularPadLen(v4HandshakePadMax - v4HandshakePadMin); err == nil {
+			padLen = v4HandshakePadMin + n
+		} else {
+			tmp := make([]byte, 2)
+			if _, err := rand.Read(tmp); err != nil {
+				panic(err)
+			}
+			padLen = v4HandshakePadMin + int(binary.BigEndian.Uint16(tmp))%(v4HandshakePadMax-v4HandshakePadMin+1)
+		}
+		var b [2]byte
+		binary.BigEndian.PutUint16(b[:], uint16(padLen))
+		padLenField = b[:]
+	} else if version >= VersionV4 {
 		if n, err := profile.SampleHandshakePadLenV4(); err == nil {
 			padLen = n
 		} else {
@@ -728,7 +780,7 @@ func parseHandshakePayload(p []byte, psk []byte, label string, peerRandomOut []b
 	gotMagic := p[saltLen : saltLen+3]
 	var magic []byte
 	version = 0
-	for _, ver := range []int{VersionV4, VersionV3, VersionV2} {
+	for _, ver := range []int{VersionV5, VersionV4, VersionV3, VersionV2} {
 		if subtle.ConstantTimeCompare(magicBytes(psk, salt, ver), gotMagic) == 1 {
 			magic = magicBytes(psk, salt, ver)
 			version = ver
@@ -739,7 +791,7 @@ func parseHandshakePayload(p []byte, psk []byte, label string, peerRandomOut []b
 		return nil, nil, 0, errors.New("魔数不对：不是 mm-x 协议")
 	}
 	if p[saltLen+3]^magic[0] != byte(version) {
-		return nil, nil, version, fmt.Errorf("版本号不受支持：对方版本 %d，本端只支持 %d、%d 和 %d", p[saltLen+3]^magic[0], VersionV2, VersionV3, VersionV4)
+		return nil, nil, version, fmt.Errorf("版本号不受支持：对方版本 %d，本端只支持 %d、%d、%d 和 %d", p[saltLen+3]^magic[0], VersionV2, VersionV3, VersionV4, VersionV5)
 	}
 	if version >= VersionV4 {
 		// v4：填充长度字段 2 字节，总长必须正好等于 78 + 填充长度。
@@ -819,8 +871,8 @@ func deriveKeys(shared, clientRand, serverRand []byte) (c2s, s2c []byte) {
 type SessionKeys struct {
 	C2S []byte // 客户端→服务端
 	S2C []byte // 服务端→客户端
-	// Version 是协商到的协议版本（2 或 3），决定握手之后走
-	// 单连接转发（v2）还是复用会话（v3）。
+	// Version 是协商到的协议版本（2/3/4/5），决定握手之后走
+	// 单连接转发（v2）还是复用会话（v3 及以后）。
 	Version int
 	// Profile 是本次连接由 PSK 派生的流量画像（见 profile.go），
 	// 决定本连接发送方的填充分布和分片大小；接收方不依赖它。
@@ -837,7 +889,7 @@ func ClientHandshake(conn net.Conn, psk []byte, badMagic, badVersion bool) (*Ses
 }
 
 // ClientHandshakeVersion 用指定版本完成客户端握手。
-// version 必须是 2 或 3；badVersion 时发一个不受支持的版本号 9。
+// version 必须是 2、3、4 或 5；badVersion 时发一个不受支持的版本号 9。
 func ClientHandshakeVersion(conn net.Conn, psk []byte, version int, badMagic, badVersion bool) (*SessionKeys, error) {
 	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return nil, err
@@ -1019,6 +1071,16 @@ type Conn struct {
 	rekeyBytes     int64
 	rekeysSent     int // 已发出的重协商帧数（测试/监控用）
 	rekeysReceived int // 已收到的重协商帧数（测试/监控用）
+	// v5 分片上限：每会话连续随机（8192–16288），0 = 用画像的档位（v4 及以前）。
+	chunkCap int
+	// lastWrite 是本连接上次成功写帧的时间（掩护流量判断空闲用）。
+	lastWrite time.Time
+	// 掩护流量（v5）：coverStop 关掉就停；两个 Once 分别保证
+	// “只启动一次”和“只关一次”，Close 和 StartCoverTraffic 乱序调也安全。
+	coverStop      chan struct{}
+	coverStartOnce sync.Once
+	coverStopOnce  sync.Once
+	chaffsSent     int // 已发出的掩护帧数（测试/监控用）
 }
 
 // 重协商的默认阈值：5 分钟或 64MB，先到先换。
@@ -1033,13 +1095,49 @@ const (
 // Profile 返回本连接的流量画像。
 func (c *Conn) Profile() TrafficProfile { return c.profile }
 
-// maxDataPayload 返回本连接 DATA 帧单帧载荷上限（画像决定，
-// 未设置画像时退回旧的固定值 16000）。
+// ChaffsSent 已发出的掩护帧数（v5 测试/监控用）。
+func (c *Conn) ChaffsSent() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.chaffsSent
+}
+
+// v5 分片上限的范围：下限 8192，上限 16288——
+// 16288 + 最大填充 31 + 帧开销（nonce 12 + 帧头 6 + tag 16 = 34）
+// = 16353，仍在 TLS 记录上限 16384 内。
+const (
+	v5ChunkCapMin = 8192
+	v5ChunkCapMax = 16288
+)
+
+// maxDataPayload 返回本连接 DATA 帧单帧载荷上限。
+// v5：每会话连续随机（8192–16288），不再是画像的 6 档固定值——
+// 多会话后 6 个离散模态本身就是特征；连续随机抹掉它。
+// v4 及以前：画像决定，未设置画像时退回旧的固定值 16000。
 func (c *Conn) maxDataPayload() int {
+	if c.chunkCap > 0 {
+		return c.chunkCap
+	}
 	if c.profile.MaxDataPayload > 0 {
 		return c.profile.MaxDataPayload
 	}
 	return maxFramePayload
+}
+
+// sampleV5FramePadLen 是 v5 的帧填充规则：按载荷尺寸分级。
+// 小载荷（<256B，主要是 yamux 控制帧和交互小包）填充 0–255，
+// 把小记录聚簇的尺寸抹开；中载荷（<1500B）填充 0–63；
+// 大载荷填充只 0–31，大流量几乎不增加开销。
+// 填充长度仍写在帧头里，接收方只读字段，不依赖这条规则。
+func sampleV5FramePadLen(payloadLen int) int {
+	switch {
+	case payloadLen < 256:
+		return randIntn(256)
+	case payloadLen < 1500:
+		return randIntn(64)
+	default:
+		return randIntn(32)
+	}
 }
 
 // NewConn 用会话密钥包装一个已握手连接。isClient 决定收发密钥方向。
@@ -1070,10 +1168,24 @@ func NewConn(c net.Conn, keys *SessionKeys, isClient bool) (*Conn, error) {
 	if profile.MaxDataPayload == 0 {
 		profile = trafficProfiles[0]
 	}
-	return &Conn{Conn: c, send: sendAEAD, recv: recvAEAD, profile: profile,
+	// v5：分片上限每会话连续随机；重协商间隔每会话抖动 4–6 分钟
+	// （原来固定 5 分钟——固定周期的小记录本身就是时序特征）。
+	chunkCap := 0
+	rekeyInterval := rekeyDefaultInterval
+	if keys.Version >= VersionV5 {
+		chunkCap = v5ChunkCapMin + randIntn(v5ChunkCapMax-v5ChunkCapMin+1)
+		rekeyInterval = 4*time.Minute + time.Duration(randIntn(121))*time.Second
+	}
+	conn := &Conn{Conn: c, send: sendAEAD, recv: recvAEAD, profile: profile,
 		version: keys.Version, recordMinor: recordMinorForVersion(keys.Version),
-		sendKey: sendKey, recvKey: recvKey,
-		lastRekey: time.Now(), rekeyInterval: rekeyDefaultInterval, rekeyBytes: rekeyDefaultBytes}, nil
+		sendKey: sendKey, recvKey: recvKey, chunkCap: chunkCap,
+		lastRekey: time.Now(), lastWrite: time.Now(),
+		rekeyInterval: rekeyInterval, rekeyBytes: rekeyDefaultBytes,
+		coverStop: make(chan struct{})}
+	// v5 会话自动起掩护流量（档位见 DefaultCoverMode，服务端/客户端
+	// 启动时由 --cover-traffic 改写；v4 及以前的会话不启动）。
+	conn.StartCoverTraffic(DefaultCoverMode)
+	return conn, nil
 }
 
 // RekeysSent 已发出的重协商帧数（v4 测试用）。
@@ -1085,7 +1197,9 @@ func (c *Conn) RekeysReceived() int { return c.rekeysReceived }
 // Close 关掉连接并清零会话密钥（C2）：已结束会话的密钥不留在内存里。
 // 注意：AEAD 内部已经复制过密钥，清零这里的切片不影响已建好的 AEAD，
 // 只是把原始密钥材料从内存里抹掉；PSK 不在这里（它在 KeyManager 里长期有效）。
+// 掩护流量的 goroutine 在这里停掉（关 coverStop，写帧失败也会自己停）。
 func (c *Conn) Close() error {
+	c.coverStopOnce.Do(func() { close(c.coverStop) })
 	for i := range c.sendKey {
 		c.sendKey[i] = 0
 	}
@@ -1223,10 +1337,14 @@ func (c *Conn) applyRekey(seed []byte) error {
 // 序号分配 + 自增和写操作在同一把锁里（A1）：两个流同时写帧
 // 再也不会拿到同一个序号。
 func (c *Conn) writeFrameLocked(frameType byte, payload []byte) error {
-	// 帧填充长度按本连接画像抽样（分布因部署而异，仍在 0–63 内）；
+	// 帧填充长度：v5 按载荷尺寸分级抽样（小帧大填充、抹开小记录聚簇，
+	// 大帧小填充、几乎不增加开销）；v4 及以前按本连接画像抽样
+	// （分布因部署而异，仍在 0–63 内）。
 	// 抽样失败时退回原来的均匀 0–63，发送绝不因此失败。
 	padLenByte := byte(0)
-	if n, err := c.profile.SampleFramePadLen(); err == nil {
+	if c.version >= VersionV5 {
+		padLenByte = byte(sampleV5FramePadLen(len(payload)))
+	} else if n, err := c.profile.SampleFramePadLen(); err == nil {
 		padLenByte = byte(n)
 	} else {
 		tmp := make([]byte, 1)
@@ -1261,6 +1379,10 @@ func (c *Conn) writeFrameLocked(frameType byte, payload []byte) error {
 	}
 	c.sendSeq++
 	c.sentSinceRekey += int64(len(payload))
+	c.lastWrite = time.Now()
+	if frameType == FrameChaff {
+		c.chaffsSent++
+	}
 	return nil
 }
 
@@ -1309,6 +1431,12 @@ func (c *Conn) ReadFrame() (byte, []byte, error) {
 			if err := c.applyRekey(payload); err != nil {
 				return 0, nil, fmt.Errorf("重协商失败：%v", err)
 			}
+			continue
+		}
+		if frameType == FrameChaff {
+			// v5 掩护帧：空闲时发的假流量，直接丢弃，不返回给调用方
+			// （序号已校验过；复用会话和 v2 单连接都走这条路，
+			// 所以掩护帧对任何调用方都不可见）。
 			continue
 		}
 		return frameType, payload, nil

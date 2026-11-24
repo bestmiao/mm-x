@@ -502,9 +502,9 @@ func TestOpaqueLinkProtocolVersion(t *testing.T) {
 	if got.Version != VersionV4 {
 		t.Fatalf("协议 ver=4 解析后版本是 %d，想要 %d", got.Version, VersionV4)
 	}
-	bad := opaqueMutate(t, opaqueV3Link(), func(blob []byte) { blob[44] = 5 })
+	bad := opaqueMutate(t, opaqueV3Link(), func(blob []byte) { blob[44] = 6 })
 	if _, err := ParseLink(bad); err == nil {
-		t.Fatalf("协议 ver=5 应被拒绝")
+		t.Fatalf("协议 ver=6 应被拒绝")
 	} else if !strings.Contains(err.Error(), "版本") {
 		t.Fatalf("协议版本不对的报错应提到版本：%v", err)
 	}

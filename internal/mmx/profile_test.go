@@ -127,14 +127,15 @@ func TestProfileInteropNewSenderOldReceiver(t *testing.T) {
 	// 发送方和接收方按 A2 各自从同一盐派生同一画像（画像号随会话而变，
 	// 不再等于 PSK 派生）；接收方画像清零模拟旧版接收方：
 	// ReadFrame 完全不依赖画像，必须把 20000 字节原样读回，
-	// 且每帧载荷都不超过发送方的分片上限。
+	// 且每帧载荷都不超过发送方实际的分片上限（v5 是每会话连续
+	// 随机值，不再是画像值）。
 	psk := profilePSKForIndex(t, 4)
 	cc, sc := handshakePairWithPSK(t, psk)
 	defer cc.Close()
 	defer sc.Close()
-	maxPayload := cc.Profile().MaxDataPayload
+	maxPayload := cc.maxDataPayload()
 	if maxPayload <= 0 || maxPayload > 16000 {
-		t.Fatalf("会话画像分片上限 %d 不合法（应为 1–16000）", maxPayload)
+		t.Fatalf("发送方实际分片上限 %d 不合法（应为 1–16000）", maxPayload)
 	}
 	// 模拟旧接收方：画像清零（等同旧版均匀发送/接收逻辑）。
 	sc.profile = TrafficProfile{}
@@ -156,7 +157,7 @@ func TestProfileInteropNewSenderOldReceiver(t *testing.T) {
 			t.Fatalf("第 %d 帧类型不对：%d", frames+1, ft)
 		}
 		if len(payload) > maxPayload {
-			t.Fatalf("第 %d 帧载荷 %d 字节，超过发送方画像分片上限 %d", frames+1, len(payload), maxPayload)
+			t.Fatalf("第 %d 帧载荷 %d 字节，超过发送方实际分片上限 %d", frames+1, len(payload), maxPayload)
 		}
 		got = append(got, payload...)
 		frames++

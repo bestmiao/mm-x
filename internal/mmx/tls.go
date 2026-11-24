@@ -369,3 +369,43 @@ func ResolveSNI(cfg *LinkConfig) string {
 	}
 	return DefaultSNI
 }
+
+// RotatedSNIs 是 v5 会话轮换用的 SNI 候选：一组常见大网站域名。
+// 针对的特征：原来每个会话的 SNI 都是 www.microsoft.com，
+// 一个 IP 上所有会话永远同一个 SNI——被动分析一眼就能把流量
+// 归到同一个目的地。轮换后同一 IP 上的会话 SNI 各不相同，
+// 看起来像 CDN/共享主机后面的多个网站。
+// 安全上没代价：pin 模式不校验主机名（只认 pin + 证书有效期），
+// SNI 换哪个都不影响证书校验；服务端也不按 SNI 选证书。
+// 局限：主动探测完成 TLS 握手后看到的仍是同一张自签证书
+// （CN=www.microsoft.com），SNI 和证书域名对不上——但自签证书
+// 本身就已经是主动探测下的识别点，SNI 轮换没有让它更糟；
+// 真想堵住这一点要开真 TLS 模式（自己的域名 + 真证书）。
+var RotatedSNIs = []string{
+	"www.microsoft.com",
+	"www.apple.com",
+	"www.amazon.com",
+	"www.cloudflare.com",
+	"www.google.com",
+	"www.bing.com",
+}
+
+// RandomRotatedSNI 从轮换候选里随机挑一个 SNI（每会话现抽）。
+func RandomRotatedSNI() string {
+	if len(RotatedSNIs) == 0 {
+		return DefaultSNI
+	}
+	return RotatedSNIs[randIntn(len(RotatedSNIs))]
+}
+
+// SessionSNI 决定一次会话握手用的 SNI：
+//   - 链接写了 sni：用它（用户指定的最优先）；
+//   - host 是域名：用 host（真证书模式，SNI 必须和证书域名一致，不轮换）；
+//   - v5 + host 是 IP：从轮换候选里随机挑一个（每会话不同）；
+//   - 其余情况：默认常见域名（v4 及以前的行为不变）。
+func SessionSNI(cfg *LinkConfig) string {
+	if cfg.Version >= VersionV5 && cfg.SNI == "" && cfg.Host != "" && net.ParseIP(cfg.Host) != nil {
+		return RandomRotatedSNI()
+	}
+	return ResolveSNI(cfg)
+}

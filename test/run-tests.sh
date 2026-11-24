@@ -21,13 +21,14 @@ B14_SRV=; B14_CLI=; B14_SRV0=; B14_CLI0=; B14_SRV3=; B14_CLI3=
 SSRF_SRV_PID=
 S9_SRV=; S15_SRV=; S15_CLI=; T17_SRV=; T17_CLI=; T19_CLI=; T20_CLI=; T20B_CLI=; T21_SRV=; T21_CLI=; T21_SOCKS=; T22_CLI=; T23_SRV=; T23_CLI=; T24_CLI=
 T25_SRV=; T25_CLI=; T25B_SRV=; T25B_CLI=; T25C_SRV=; T25C_CLI=
+T20C_CLI=; T26_SRV=; T26_CLI=; T26B_CLI=; T26C_SRV=; T26D_CLI=
 ok()   { echo "[PASS] $1"; pass=$((pass+1)); }
 bad()  { echo "[FAIL] $1"; fail=$((fail+1)); }
 skipped() { echo "[SKIP] $1"; skip=$((skip+1)); }
 note() { echo "--- $1"; }
 
 cleanup() {
-  kill $HTTP_PID $SRV_PID $CLI_PID $CLI2_PID $RSRV_PID $RCLI_PID $RCLI2_PID $BSRV_PID $BCLI_PID $BSRV2_PID $BCLI2_PID $RSRV2_PID $RCLI3_PID $RCLI4_PID $B14_SRV $B14_CLI $B14_SRV0 $B14_CLI0 $B14_SRV3 $B14_CLI3 $S9_SRV $S15_SRV $S15_CLI $T17_SRV $T17_CLI $T19_CLI $T20_CLI $T20B_CLI $T21_SRV $T21_CLI $T21_SOCKS $T22_CLI $T23_SRV $T23_CLI $T24_CLI $T25_SRV $T25_CLI $T25B_SRV $T25B_CLI $T25C_SRV $T25C_CLI $SSRF_SRV_PID 2>/dev/null
+  kill $HTTP_PID $SRV_PID $CLI_PID $CLI2_PID $RSRV_PID $RCLI_PID $RCLI2_PID $BSRV_PID $BCLI_PID $BSRV2_PID $BCLI2_PID $RSRV2_PID $RCLI3_PID $RCLI4_PID $B14_SRV $B14_CLI $B14_SRV0 $B14_CLI0 $B14_SRV3 $B14_CLI3 $S9_SRV $S15_SRV $S15_CLI $T17_SRV $T17_CLI $T19_CLI $T20_CLI $T20B_CLI $T20C_CLI $T21_SRV $T21_CLI $T21_SOCKS $T22_CLI $T23_SRV $T23_CLI $T24_CLI $T25_SRV $T25_CLI $T25B_SRV $T25B_CLI $T25C_SRV $T25C_CLI $T26_SRV $T26_CLI $T26B_CLI $T26C_SRV $T26D_CLI $SSRF_SRV_PID 2>/dev/null
   # 注意：不要在这里 wait——本脚本的输出经过 tee，wait 会等 tee，
   # 而 tee 在等脚本退出，造成死锁。
 }
@@ -151,10 +152,10 @@ err_case bad-magic --bad-magic 握手失败 18084 握手失败
 err_case bad-version --bad-version 握手失败 18085 握手失败
 # bad-key 用 v2 链接：v2 是 CONNECT+ACK 路径，篡改密钥后服务端解密失败；
 # v4 是 yamux 会话，篡改密钥后整个会话直接死掉（见下面的 v4 检查），不是 ACK 失败。
-LINK_V2_ERR=$(echo "$LINK" | sed 's/ver=4/ver=2/')
+LINK_V2_ERR=$(echo "$LINK" | sed 's/ver=5/ver=2/')
 err_case bad-key --bad-key "等待服务端 ACK 失败" 18086 "解密失败" "$LINK_V2_ERR"
-# v4 bad-key：篡改密钥后 yamux 会话建不起来，服务端会话直接结束。
-BEFORE_BKV3=$(grep -c "v3/v4 会话结束" test/server.log || true)
+# v5 bad-key：篡改密钥后 yamux 会话建不起来，服务端会话直接结束。
+BEFORE_BKV3=$(grep -c "v3/v4/v5 会话结束" test/server.log || true)
 ./mmx-client --link "$LINK" --target 127.0.0.1:$HTTP_PORT --listen 127.0.0.1:18087 --bad-key > test/err-bad-key-v4.log 2>&1 &
 BADKEY_V3_PID=$!
 sleep 1
@@ -162,9 +163,9 @@ curl -s --max-time 5 "http://127.0.0.1:18087/index.html" >/dev/null 2>&1
 V3BK_CODE=$?
 sleep 1
 kill $BADKEY_V3_PID 2>/dev/null
-AFTER_BKV3=$(grep -c "v3/v4 会话结束" test/server.log || true)
-if [ "$V3BK_CODE" != 0 ] && [ "$AFTER_BKV3" -gt "$BEFORE_BKV3" ]; then ok "v4 bad-key：连接失败且服务端 v3/v4 会话结束（篡改密钥后会话建不起来）";
-else bad "v4 bad-key 未按预期失败（curl 退出码 $V3BK_CODE，服务端 v3/v4 会话结束 $BEFORE_BKV3 → $AFTER_BKV3）"; fi
+AFTER_BKV3=$(grep -c "v3/v4/v5 会话结束" test/server.log || true)
+if [ "$V3BK_CODE" != 0 ] && [ "$AFTER_BKV3" -gt "$BEFORE_BKV3" ]; then ok "v5 bad-key：连接失败且服务端 v3/v4/v5 会话结束（篡改密钥后会话建不起来）";
+else bad "v5 bad-key 未按预期失败（curl 退出码 $V3BK_CODE，服务端 v3/v4/v5 会话结束 $BEFORE_BKV3 → $AFTER_BKV3）"; fi
 
 note "测试5补：错误测试后服务端仍可用（好客户端再连一次）"
 curl -s --max-time 10 "http://127.0.0.1:$CLI_PORT/index.html" | grep -q "Hello mm-x" && ok "错误测试后服务端仍正常服务" || bad "错误测试后服务端异常"
@@ -172,7 +173,7 @@ curl -s --max-time 10 "http://127.0.0.1:$CLI_PORT/index.html" | grep -q "Hello m
 note "测试5补2：目标过滤——内网目标应被拒绝（SSRF 防护，P0-2）"
 # 这个服务端故意不加 --allow-private（默认只许公网目标）：
 # 客户端要去的目标是本机 HTTP 服务（127.0.0.1），应被拒绝。
-# v4 和 v2 两条拨号路径都测（v2 链接把 ver=4 改成 ver=2）。
+# v5 和 v2 两条拨号路径都测（v2 链接把 ver=5 改成 ver=2）。
 ./mmx-server --listen 127.0.0.1:18140 --psk "$PSK_HEX" --block-fails 100 --name "SSRF测试" > test/server-ssrf.log 2>&1 &
 SSRF_SRV_PID=$!
 sleep 1
@@ -187,8 +188,8 @@ ssrf_case() { # $1=名字 $2=链接 $3=监听端口 $4=客户端日志
   kill $pid 2>/dev/null
   if [ "$code" != 0 ] && grep -q "目标不允许" "$4"; then ok "$1：内网目标被拒绝，客户端报错含[目标不允许]"; else bad "$1：内网目标未被拒绝（curl 退出码 $code，日志见 $4）"; fi
 }
-ssrf_case "SSRF-v4" "$SSRF_LINK" 18141 test/client-ssrf-v4.log
-SSRF_LINK_V2=$(echo "$SSRF_LINK" | sed 's/ver=4/ver=2/')
+ssrf_case "SSRF-v5" "$SSRF_LINK" 18141 test/client-ssrf-v5.log
+SSRF_LINK_V2=$(echo "$SSRF_LINK" | sed 's/ver=5/ver=2/')
 ssrf_case "SSRF-v2" "$SSRF_LINK_V2" 18142 test/client-ssrf-v2.log
 grep -q "目标不允许" test/server-ssrf.log && ok "SSRF：服务端日志有[目标不允许]记录" || bad "SSRF：服务端日志无[目标不允许]记录"
 kill $SSRF_SRV_PID 2>/dev/null; SSRF_SRV_PID=""
@@ -689,7 +690,7 @@ T17_SRV=$!
 sleep 1
 LINK_TLS=$(./mmx-server --print-link --listen 127.0.0.1:18115 --psk "$PSK_HEX" --host localhost --tls-domain localhost --tls-cert test/tls-cert.pem --tls-key test/tls-key.pem --name "TLS测试" 2>/dev/null)
 echo "TLS 模式服务端链接：$LINK_TLS"
-echo "$LINK_TLS" | grep -q "pin=" && echo "$LINK_TLS" | grep -q "ver=4" && ok "TLS 模式打印的链接是短格式（ver=4 + pin，obfs=tls 为默认）" || bad "TLS 模式链接不对：$LINK_TLS"
+echo "$LINK_TLS" | grep -q "pin=" && echo "$LINK_TLS" | grep -q "ver=5" && ok "TLS 模式打印的链接是短格式（ver=5 + pin，obfs=tls 为默认）" || bad "TLS 模式链接不对：$LINK_TLS"
 grep -q "真 TLS 模式：域名 localhost" test/server-tls.log && ok "服务端日志确认真 TLS 模式（域名 localhost）" || bad "服务端日志无真 TLS 记录"
 ./mmx-client --link "$LINK_TLS" --target 127.0.0.1:$HTTP_PORT --listen 127.0.0.1:18116 --tls-insecure > test/client-tls.log 2>&1 &
 T17_CLI=$!
@@ -706,14 +707,14 @@ curl -s --max-time 5 "http://127.0.0.1:18115/" | grep -q "我的小站" && ok "�
 curl -s --max-time 10 "http://127.0.0.1:18116/index.html" | grep -q "Hello mm-x" && ok "TLS 探测后 mm-x 客户端仍正常" || bad "TLS 探测后客户端异常"
 kill $T17_CLI $T17_SRV 2>/dev/null; T17_CLI=; T17_SRV=
 
-note "测试19：v4 复用——20 条并行流只用一条会话（1 次握手），数据完整"
+note "测试19：v5 复用——20 条并行流只用一条会话（1 次握手），数据完整"
 # 关键断言：20 个并发请求只产生 1 次新的 v4 握手（会话池单飞），
 # 而不是每个请求各拨一条连接；curl 必须用 env -u no_proxy（沙箱的
 # no_proxy 含 127.0.0.1，会让 curl 绕过 --socks5 直连目标）。
 ./mmx-client --link "$LINK" --socks-listen 127.0.0.1:18133 > test/client-t19.log 2>&1 &
 T19_CLI=$!
 sleep 1
-BEFORE19=$(grep -c "握手成功（ver=4）" test/server2.log || true)
+BEFORE19=$(grep -c "握手成功（ver=5）" test/server2.log || true)
 rm -f test/t19.ok
 # 注意：不能用裸 wait——本脚本输出经过 tee，裸 wait 会等 tee，
 # 而 tee 在等脚本退出，造成死锁（见脚本开头 trap 注释）。
@@ -725,16 +726,16 @@ for i in $(seq 20); do
 done
 for p in $PIDS19; do wait $p 2>/dev/null; done
 OK19=$(wc -l < test/t19.ok 2>/dev/null || echo 0)
-AFTER19=$(grep -c "握手成功（ver=4）" test/server2.log || true)
+AFTER19=$(grep -c "握手成功（ver=5）" test/server2.log || true)
 NEW19=$((AFTER19 - BEFORE19))
-echo "20 并行流：成功 $OK19/20，新增 v4 握手 $NEW19 次"
+echo "20 并行流：成功 $OK19/20，新增 v5 握手 $NEW19 次"
 if [ "$OK19" = 20 ] && [ "$NEW19" = 1 ]; then ok "20 条并行流全通，且只用 1 次握手（复用生效）";
 elif [ "$OK19" = 20 ]; then bad "20 条并行流全通，但新增握手 $NEW19 次（应为 1 次，会话池没复用）";
 else bad "20 条并行流只成功 $OK19/20"; fi
 kill $T19_CLI 2>/dev/null; T19_CLI=
 
 note "测试20：v2 回归——显式 ver=2 链接在新服务端上仍能用"
-LINK2=$(echo "$LINK" | sed 's/ver=4/ver=2/')
+LINK2=$(echo "$LINK" | sed 's/ver=5/ver=2/')
 ./mmx-client --link "$LINK2" --target 127.0.0.1:$HTTP_PORT --listen 127.0.0.1:18134 > test/client-t20.log 2>&1 &
 T20_CLI=$!
 sleep 1
@@ -742,14 +743,23 @@ curl -s --max-time 10 "http://127.0.0.1:18134/index.html" | grep -q "Hello mm-x"
 grep -q "握手成功（ver=2）" test/server2.log && ok "服务端日志确认这次是 v2 握手（双版本共存）" || bad "服务端日志里没有 v2 握手记录"
 kill $T20_CLI 2>/dev/null; T20_CLI=
 
-note "测试20补：v3 回归——显式 ver=3 链接在新服务端上仍能用（v4 服务端向下兼容）"
-LINK3=$(echo "$LINK" | sed 's/ver=4/ver=3/')
+note "测试20补：v3 回归——显式 ver=3 链接在新服务端上仍能用（v5 服务端向下兼容）"
+LINK3=$(echo "$LINK" | sed 's/ver=5/ver=3/')
 ./mmx-client --link "$LINK3" --target 127.0.0.1:$HTTP_PORT --listen 127.0.0.1:18135 > test/client-t20b.log 2>&1 &
 T20B_CLI=$!
 sleep 1
 curl -s --max-time 10 "http://127.0.0.1:18135/index.html" | grep -q "Hello mm-x" && ok "ver=3 链接经新服务端拿到正确内容" || bad "ver=3 链接在新服务端上不通"
-grep -q "握手成功（ver=3）" test/server2.log && ok "服务端日志确认这次是 v3 握手（三版本共存）" || bad "服务端日志里没有 v3 握手记录"
+grep -q "握手成功（ver=3）" test/server2.log && ok "服务端日志确认这次是 v3 握手（四版本共存）" || bad "服务端日志里没有 v3 握手记录"
 kill $T20B_CLI 2>/dev/null; T20B_CLI=
+
+note "测试20补2：v4 回归——显式 ver=4 链接在新服务端上仍能用（v5 服务端向下兼容）"
+LINK4=$(echo "$LINK" | sed 's/ver=5/ver=4/')
+./mmx-client --link "$LINK4" --target 127.0.0.1:$HTTP_PORT --listen 127.0.0.1:18136 > test/client-t20c.log 2>&1 &
+T20C_CLI=$!
+sleep 1
+curl -s --max-time 10 "http://127.0.0.1:18136/index.html" | grep -q "Hello mm-x" && ok "ver=4 链接经新服务端拿到正确内容" || bad "ver=4 链接在新服务端上不通"
+grep -q "握手成功（ver=4）" test/server2.log && ok "服务端日志确认这次是 v4 握手（四版本共存）" || bad "服务端日志里没有 v4 握手记录"
+kill $T20C_CLI 2>/dev/null; T20C_CLI=
 
 note "测试21：v4 自签 TLS + SPKI 锁定（--tls-auto，无域名）"
 mkdir -p test/tls-auto
@@ -758,7 +768,7 @@ T21_SRV=$!
 sleep 1
 LINK_AUTO=$(./mmx-server --print-link --listen 127.0.0.1:18120 --psk "$PSK_HEX" --block-fails 100 --host localhost --tls-auto --tls-cert test/tls-auto/cert.pem --tls-key test/tls-auto/key.pem --name "TLS自签" 2>/dev/null)
 echo "自签 TLS 链接：$LINK_AUTO"
-echo "$LINK_AUTO" | grep -q "ver=4" && echo "$LINK_AUTO" | grep -q "pin=" && ! echo "$LINK_AUTO" | grep -q "sni=" && ok "自签 TLS 链接是短格式（ver=4 + pin，sni 默认省略）" || bad "自签 TLS 链接不对：$LINK_AUTO"
+echo "$LINK_AUTO" | grep -q "ver=5" && echo "$LINK_AUTO" | grep -q "pin=" && ! echo "$LINK_AUTO" | grep -q "sni=" && ok "自签 TLS 链接是短格式（ver=5 + pin，sni 默认省略）" || bad "自签 TLS 链接不对：$LINK_AUTO"
 grep -q "自签 TLS 模式" test/server-tlsauto.log && ok "服务端日志确认自签 TLS 模式" || bad "服务端日志无自签 TLS 记录"
 ls -l test/tls-auto/cert.pem test/tls-auto/key.pem >/dev/null 2>&1 && ok "自签证书已生成并存到文件" || bad "自签证书文件没生成"
 # 带正确 pin 的客户端（不用 --tls-insecure）应连通——pin 锁定生效。
@@ -921,6 +931,48 @@ kill $T25C_CLI $T25C_SRV 2>/dev/null; T25C_CLI=; T25C_SRV=
 ./mmx-server --traffic-start-day 32 2>&1 | grep -q "周期起始日不合法" && ok "起始日 32 启动失败并提示周期起始日不合法" || bad "起始日 32 没被拒绝"
 ./mmx-server --traffic-mode foo 2>&1 | grep -q "流量统计模式不合法" && ok "统计模式 foo 启动失败并提示模式不合法" || bad "统计模式 foo 没被拒绝"
 ./mmx-server --traffic-limit-mode throttle --traffic-throttle-rate 0 2>&1 | grep -q "TC 限速值不合法" && ok "TC 限速模式下限速值 0 启动失败并提示" || bad "TC 限速值 0 没被拒绝"
+
+note "测试26：v5 流量伪装——默认 ver=5 链接、不透明 v5 链接、掩护流量开关"
+# 26a：默认链接已是 ver=5（BuildLink 默认），经新服务端拿到正确内容，
+# 服务端日志确认这次是 v5 握手。
+./mmx-server --listen 127.0.0.1:18160 --psk "$PSK_HEX" --block-fails 100 --name "v5测试" --allow-private > test/server-t26.log 2>&1 &
+T26_SRV=$!
+sleep 1
+LINK26=$(./mmx-server --print-link --listen 127.0.0.1:18160 --psk "$PSK_HEX" --block-fails 100 --name "v5测试" 2>/dev/null)
+echo "$LINK26" | grep -q "ver=5" && ok "默认链接已是 ver=5" || bad "默认链接不是 ver=5：$LINK26"
+./mmx-client --link "$LINK26" --target 127.0.0.1:$HTTP_PORT --listen 127.0.0.1:18161 > test/client-t26.log 2>&1 &
+T26_CLI=$!
+sleep 1
+curl -s --max-time 10 "http://127.0.0.1:18161/index.html" | grep -q "Hello mm-x" && ok "ver=5 默认链接经服务端拿到正确内容" || bad "ver=5 默认链接不通"
+grep -q "握手成功（ver=5）" test/server-t26.log && ok "服务端日志确认这次是 v5 握手" || bad "服务端日志里没有 v5 握手记录"
+kill $T26_CLI 2>/dev/null; T26_CLI=
+# 26b：不透明 v5 链接（乱码式，不带 @、不露地址）也能连通。
+LINK26B=$(./mmx-server --print-link --link-format opaque --listen 127.0.0.1:18160 --psk "$PSK_HEX" --block-fails 100 --name "v5测试" 2>/dev/null)
+case "$LINK26B" in *mmx://*@*) bad "不透明链接里不应出现 @（地址没藏住）" ;; mmx://*) ok "不透明链接是 mmx:// 前缀、无 @（地址藏在乱码里）" ;; *) bad "不透明链接格式不对：$LINK26B" ;; esac
+./mmx-client --link "$LINK26B" --target 127.0.0.1:$HTTP_PORT --listen 127.0.0.1:18162 > test/client-t26b.log 2>&1 &
+T26B_CLI=$!
+sleep 1
+curl -s --max-time 10 "http://127.0.0.1:18162/index.html" | grep -q "Hello mm-x" && ok "不透明 v5 链接经服务端拿到正确内容" || bad "不透明 v5 链接不通"
+kill $T26B_CLI 2>/dev/null; T26B_CLI=
+kill $T26_SRV 2>/dev/null; T26_SRV=
+# 26c：--cover-traffic 档位校验：非法值启动失败并指明原因；off 能正常启动。
+./mmx-server --listen 127.0.0.1:18163 --psk "$PSK_HEX" --cover-traffic foo --name "掩护校验" --allow-private 2>&1 | grep -q "掩护流量档位不合法" && ok "掩护档位 foo 启动失败并提示档位不合法" || bad "掩护档位 foo 没被拒绝"
+./mmx-server --listen 127.0.0.1:18163 --psk "$PSK_HEX" --cover-traffic off --name "掩护关" --allow-private > test/server-t26c.log 2>&1 &
+T26C_SRV=$!
+sleep 1
+grep -q "监听" test/server-t26c.log && ok "--cover-traffic off 的服务端能正常启动" || bad "--cover-traffic off 的服务端没起来"
+kill $T26C_SRV 2>/dev/null; T26C_SRV=
+# 26d：v4 显式链接在 v5 服务端上仍能用（老版本行为不变）。
+./mmx-server --listen 127.0.0.1:18164 --psk "$PSK_HEX" --block-fails 100 --name "v5兼容" --allow-private > test/server-t26d.log 2>&1 &
+T26_SRV=$!
+sleep 1
+LINK26D=$(./mmx-server --print-link --listen 127.0.0.1:18164 --psk "$PSK_HEX" --block-fails 100 --name "v5兼容" 2>/dev/null | sed 's/ver=5/ver=4/')
+./mmx-client --link "$LINK26D" --target 127.0.0.1:$HTTP_PORT --listen 127.0.0.1:18165 > test/client-t26d.log 2>&1 &
+T26D_CLI=$!
+sleep 1
+curl -s --max-time 10 "http://127.0.0.1:18165/index.html" | grep -q "Hello mm-x" && ok "ver=4 显式链接在 v5 服务端上仍能用" || bad "ver=4 显式链接在 v5 服务端上不通"
+kill $T26D_CLI 2>/dev/null; T26D_CLI=
+kill $T26_SRV 2>/dev/null; T26_SRV=
 
 echo ""
 echo "================ 结果汇总 ================"

@@ -55,7 +55,21 @@ func main() {
 	badVersion := flag.Bool("bad-version", false, "测试用：发送错误的版本号")
 	badKey := flag.Bool("bad-key", false, "测试用：握手后篡改会话密钥")
 	tlsInsecure := flag.Bool("tls-insecure", false, "测试用：obfs=tls 时跳过服务端证书校验（只用于自签名证书的测试，正式部署绝不能用）")
+	coverStr := flag.String("cover-traffic", "low", "掩护流量（v5 会话）：off（关）/ low（默认，空闲时平均约 45 秒一帧小记录）/ high（空闲时平均约 20 秒一帧）")
+	sessionMaxAgeStr := flag.String("session-max-age", "30m", "会话轮换的最长存活：超过后在空闲时重拨新会话，例如 30m / 1h，0 = 不轮换")
 	flag.Parse()
+
+	// 掩护流量档位 + 会话轮换（校验失败直接退出，指明错在哪一项）。
+	coverMode, err := mmx.ParseCoverMode(*coverStr)
+	if err != nil {
+		log.Fatalf("掩护流量：%v", err)
+	}
+	mmx.DefaultCoverMode = coverMode
+	maxAge, err := time.ParseDuration(*sessionMaxAgeStr)
+	if err != nil || maxAge < 0 {
+		log.Fatalf("会话轮换时长不合法：%q，应为 30m / 1h 这类时长，0 = 不轮换", *sessionMaxAgeStr)
+	}
+	pool.SetMaxAge(maxAge)
 
 	socksMode := *socksListen != ""
 	if !socksMode && *target == "" {

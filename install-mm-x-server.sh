@@ -49,6 +49,9 @@ TRAFFIC_START_DAY="1"
 TRAFFIC_LIMIT_MODE="block"
 TRAFFIC_QUOTA="0"
 TRAFFIC_THROTTLE_RATE="125K"
+# 掩护流量（v5 会话）：默认 low（空闲时平均约 45 秒一帧小记录）；
+# off = 关，high = 空闲时平均约 20 秒一帧。
+COVER_TRAFFIC="low"
 
 usage() {
   echo "用法：sudo $0 [--port 端口] [--rate 限速] [--burst 突发] [--name 节点名] [--host 公网IP或域名] [--bin 服务端二进制路径] [--whitelist-ip 中转机IP] [--whitelist-file 白名单文件] [--fallback site|silent] [--tls-domain 域名 --tls-cert 证书 --tls-key 私钥]"
@@ -91,6 +94,8 @@ usage() {
   echo "                   throttle（TC 限速，降到 --traffic-throttle-rate 继续用）"
   echo "  --traffic-quota  每周期流量限额，默认 0（不限）：数字 + K/M/G/T，例如 500G、1T"
   echo "  --traffic-throttle-rate TC 限速值，默认 125K（约 1 Mbps）：超限后全站降到的速度，例如 1M"
+  echo "  --cover-traffic  掩护流量（v5 会话），默认 low：off（关）/ low（空闲时平均约 45 秒一帧小记录）/"
+  echo "                   high（空闲时平均约 20 秒一帧）"
   exit 1
 }
 
@@ -118,6 +123,7 @@ while [ $# -gt 0 ]; do
     --traffic-limit-mode) TRAFFIC_LIMIT_MODE="$2"; shift 2 ;;
     --traffic-quota) TRAFFIC_QUOTA="$2"; shift 2 ;;
     --traffic-throttle-rate) TRAFFIC_THROTTLE_RATE="$2"; shift 2 ;;
+    --cover-traffic) COVER_TRAFFIC="$2"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "未知参数：$1"; usage ;;
   esac
@@ -131,6 +137,10 @@ fi
 # 回退模式与真 TLS 参数校验
 if [ "$FALLBACK" != "site" ] && [ "$FALLBACK" != "silent" ]; then
   echo "回退方式不合法：$FALLBACK，应为 site（默认）或 silent"
+  exit 1
+fi
+if [ "$COVER_TRAFFIC" != "off" ] && [ "$COVER_TRAFFIC" != "low" ] && [ "$COVER_TRAFFIC" != "high" ] && [ "$COVER_TRAFFIC" != "关" ] && [ "$COVER_TRAFFIC" != "低" ] && [ "$COVER_TRAFFIC" != "高" ]; then
+  echo "掩护流量档位不合法：$COVER_TRAFFIC，应为 off（关）/ low（低，默认）/ high（高）"
   exit 1
 fi
 if [ -n "$TLS_DOMAIN" ] || [ -n "$TLS_CERT" ] || [ -n "$TLS_KEY" ]; then
@@ -329,7 +339,7 @@ fi
 WHITELIST_IPS_STR="${WHITELIST_IPS[*]:-}"
 ALLOW_IPS_STR="${ALLOW_IPS[*]:-}"
 {
-  printf '%s=%q\n' PORT "$PORT" RATE "$RATE" BURST "$BURST" NAME "$NAME" HOST "$HOST" FALLBACK "$FALLBACK" TLS_DOMAIN "$TLS_DOMAIN" TLS_CERT "$TLS_CERT" TLS_KEY "$TLS_KEY" TLS_AUTO "$TLS_AUTO" TLS_SNI "$TLS_SNI" WHITELIST_IPS "$WHITELIST_IPS_STR" WHITELIST_FILE "$WHITELIST_FILE_INSTALLED" ALLOW_IPS "$ALLOW_IPS_STR" ALLOWLIST_FILE "$ALLOWLIST_FILE_INSTALLED" TRAFFIC_MODE "$TRAFFIC_MODE" TRAFFIC_PERIOD "$TRAFFIC_PERIOD" TRAFFIC_START_DAY "$TRAFFIC_START_DAY" TRAFFIC_LIMIT_MODE "$TRAFFIC_LIMIT_MODE" TRAFFIC_QUOTA "$TRAFFIC_QUOTA" TRAFFIC_THROTTLE_RATE "$TRAFFIC_THROTTLE_RATE"
+  printf '%s=%q\n' PORT "$PORT" RATE "$RATE" BURST "$BURST" NAME "$NAME" HOST "$HOST" FALLBACK "$FALLBACK" TLS_DOMAIN "$TLS_DOMAIN" TLS_CERT "$TLS_CERT" TLS_KEY "$TLS_KEY" TLS_AUTO "$TLS_AUTO" TLS_SNI "$TLS_SNI" WHITELIST_IPS "$WHITELIST_IPS_STR" WHITELIST_FILE "$WHITELIST_FILE_INSTALLED" ALLOW_IPS "$ALLOW_IPS_STR" ALLOWLIST_FILE "$ALLOWLIST_FILE_INSTALLED" TRAFFIC_MODE "$TRAFFIC_MODE" TRAFFIC_PERIOD "$TRAFFIC_PERIOD" TRAFFIC_START_DAY "$TRAFFIC_START_DAY" TRAFFIC_LIMIT_MODE "$TRAFFIC_LIMIT_MODE" TRAFFIC_QUOTA "$TRAFFIC_QUOTA" TRAFFIC_THROTTLE_RATE "$TRAFFIC_THROTTLE_RATE" COVER_TRAFFIC "$COVER_TRAFFIC"
 } > "$CFG_FILE"
 chmod 600 "$CFG_FILE"
 echo "配置文件已写入：$CFG_FILE"
@@ -369,6 +379,7 @@ TLS_AUTO="0"; TLS_SNI=""
 WHITELIST_IPS=""; WHITELIST_FILE=""; ALLOW_IPS=""; ALLOWLIST_FILE=""
 TRAFFIC_MODE="total"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
 TRAFFIC_LIMIT_MODE="block"; TRAFFIC_QUOTA="0"; TRAFFIC_THROTTLE_RATE="125K"
+COVER_TRAFFIC="low"
 
 load_config() {
   if [ -f "$CFG_FILE" ]; then
@@ -380,7 +391,7 @@ load_config() {
 save_config() {
   mkdir -p "$CFG_DIR"
   {
-    printf '%s=%q\n' PORT "$PORT" RATE "$RATE" BURST "$BURST" NAME "$NAME" HOST "$HOST" FALLBACK "$FALLBACK" TLS_DOMAIN "$TLS_DOMAIN" TLS_CERT "$TLS_CERT" TLS_KEY "$TLS_KEY" TLS_AUTO "$TLS_AUTO" TLS_SNI "$TLS_SNI" WHITELIST_IPS "$WHITELIST_IPS" WHITELIST_FILE "$WHITELIST_FILE" ALLOW_IPS "$ALLOW_IPS" ALLOWLIST_FILE "$ALLOWLIST_FILE" TRAFFIC_MODE "$TRAFFIC_MODE" TRAFFIC_PERIOD "$TRAFFIC_PERIOD" TRAFFIC_START_DAY "$TRAFFIC_START_DAY" TRAFFIC_LIMIT_MODE "$TRAFFIC_LIMIT_MODE" TRAFFIC_QUOTA "$TRAFFIC_QUOTA" TRAFFIC_THROTTLE_RATE "$TRAFFIC_THROTTLE_RATE"
+    printf '%s=%q\n' PORT "$PORT" RATE "$RATE" BURST "$BURST" NAME "$NAME" HOST "$HOST" FALLBACK "$FALLBACK" TLS_DOMAIN "$TLS_DOMAIN" TLS_CERT "$TLS_CERT" TLS_KEY "$TLS_KEY" TLS_AUTO "$TLS_AUTO" TLS_SNI "$TLS_SNI" WHITELIST_IPS "$WHITELIST_IPS" WHITELIST_FILE "$WHITELIST_FILE" ALLOW_IPS "$ALLOW_IPS" ALLOWLIST_FILE "$ALLOWLIST_FILE" TRAFFIC_MODE "$TRAFFIC_MODE" TRAFFIC_PERIOD "$TRAFFIC_PERIOD" TRAFFIC_START_DAY "$TRAFFIC_START_DAY" TRAFFIC_LIMIT_MODE "$TRAFFIC_LIMIT_MODE" TRAFFIC_QUOTA "$TRAFFIC_QUOTA" TRAFFIC_THROTTLE_RATE "$TRAFFIC_THROTTLE_RATE" COVER_TRAFFIC "$COVER_TRAFFIC"
   } > "$CFG_FILE"
   chmod 600 "$CFG_FILE"
 }
@@ -403,6 +414,8 @@ write_service() {
   # 流量统计与限额：一直写进启动参数（限额 0 = 不限，只统计不限制）；
   # 计数持久化文件固定在配置目录下（/etc/mmx/traffic.json）。
   traffic_args=" --traffic-mode ${TRAFFIC_MODE:-total} --traffic-period ${TRAFFIC_PERIOD:-monthly} --traffic-start-day ${TRAFFIC_START_DAY:-1} --traffic-limit-mode ${TRAFFIC_LIMIT_MODE:-block} --traffic-quota ${TRAFFIC_QUOTA:-0} --traffic-throttle-rate ${TRAFFIC_THROTTLE_RATE:-125K} --traffic-file $CFG_DIR/traffic.json"
+  # 掩护流量（v5 会话）：一直写进启动参数，默认 low。
+  cover_args=" --cover-traffic ${COVER_TRAFFIC:-low}"
   mkdir -p "$UNIT_DIR"
   cat > "$UNIT_FILE" <<UNIT_EOF
 [Unit]
@@ -415,7 +428,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=$SERVER_BIN --psk-file $PSK_FILE --listen 0.0.0.0:$PORT --rate $RATE --burst $BURST --name "$NAME" --fallback $FALLBACK$tls_args$wl_args$al_args$traffic_args
+ExecStart=$SERVER_BIN --psk-file $PSK_FILE --listen 0.0.0.0:$PORT --rate $RATE --burst $BURST --name "$NAME" --fallback $FALLBACK$tls_args$wl_args$al_args$traffic_args$cover_args
 Restart=always
 RestartSec=5
 # 密钥文件只让 root 读，服务以 root 跑（只监听一个端口，不写别的目录）
@@ -533,7 +546,7 @@ show_link() {
     link="$("$SERVER_BIN" --print-link --link-format "$fmt" --psk "$psk" --host "$host" --listen "0.0.0.0:$PORT" --rate "$RATE" --burst "$BURST" --name "$NAME" --tls-domain "$TLS_DOMAIN" --tls-cert "$TLS_CERT" --tls-key "$TLS_KEY" 2>/dev/null)"
   elif [ "${TLS_AUTO:-0}" = "1" ]; then
     # 自签模式：--print-link 会按路径加载证书（没有就现场生成），
-    # 链接是短格式（ver=4 + pin，obfs=tls 和默认 sni 不写进链接）。
+    # 链接是短格式（ver=5 + pin，obfs=tls 和默认 sni 不写进链接）。
     local sni_args=()
     if [ -n "${TLS_SNI:-}" ]; then sni_args=(--tls-sni "$TLS_SNI"); fi
     if [ -z "$host" ]; then host="<你的 VPS 公网 IP>"; fi
@@ -840,7 +853,7 @@ tls_menu() {
 
 # 8) 修改节点参数：先显示当前启动命令，再按项改；改完校验，写回配置，
 #    重载 + 重启，重启失败自动回滚。第 11 项是流量设置（统计模式/周期/
-#    起始日/限制模式/限额/TC 限速值 + 查看流量）。
+#    起始日/限制模式/限额/TC 限速值 + 查看流量），第 12 项是掩护流量档位。
 edit_params() {
   while true; do
     load_config
@@ -859,6 +872,7 @@ edit_params() {
     echo "9) 连接白名单文件（当前 ${ALLOWLIST_FILE:-未设置}）"
     echo "10) 诱饵回退 / TLS 设置"
     echo "11) 流量设置（统计模式 / 周期 / 限额 / 查看流量）"
+    echo "12) 掩护流量（当前 ${COVER_TRAFFIC:-low}：off 关 / low 空闲约 45 秒一帧 / high 空闲约 20 秒一帧）"
     echo "0) 返回"
     local c
     read -r -p "改哪一项： " c || return 0
@@ -951,6 +965,16 @@ edit_params() {
         ;;
       10) tls_menu ;;
       11) traffic_menu ;;
+      12)
+        local cv
+        read -r -p "掩护流量档位（off 关 / low 低 / high 高，留空不变）： " cv || continue
+        [ -z "$cv" ] && { echo "没改。"; pause; continue; }
+        case "$cv" in
+          off|low|high|关|低|高) COVER_TRAFFIC="$cv" ;;
+          *) echo "档位不对：$cv，应为 off / low / high"; pause; continue;;
+        esac
+        apply_config "掩护流量改为 $COVER_TRAFFIC"
+        ;;
       0|"") return 0 ;;
       *) echo "没有这个选项" ;;
     esac

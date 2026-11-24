@@ -92,7 +92,7 @@ chmod +x "$STUB_BIN/curl"
 export MMX_TEST_ROOT="$TEST_ROOT"
 export PATH="$TEST_ROOT/usr/local/bin:$STUB_BIN:$PATH"
 
-note "编译服务端二进制（当前源码，v3）"
+note "编译服务端二进制（当前源码，v5）"
 $GO build -o "$SRC_DIR/mmx-server-linux-amd64" ./cmd/mmx-server || { echo "编译失败"; exit 1; }
 ok "编译通过"
 cp install-mm-x-server.sh "$SRC_DIR/"
@@ -131,7 +131,7 @@ run_mm() { printf '%b' "$1" | "$MM_BIN" > "$TEST_ROOT/mm-out.txt" 2>&1; cat "$TE
 note "测试2：菜单第 1 项显示链接"
 LINK_OUT="$(run_mm '1\n10\n')"
 printf '%s' "$LINK_OUT" | grep -q "mmx://" && ok "菜单显示出 mmx:// 链接" || bad "菜单没显示链接"
-printf '%s' "$LINK_OUT" | grep -q "ver=4" && ok "链接是 ver=4（v4 默认）" || bad "链接版本不对"
+printf '%s' "$LINK_OUT" | grep -q "ver=5" && ok "链接是 ver=5（v5 默认）" || bad "链接版本不对"
 printf '%s' "$LINK_OUT" | grep -q "203.0.113.5" && ok "链接里的地址是探测到的公网 IP" || bad "链接地址不对"
 ! printf '%s' "$LINK_OUT" | grep -q "rate=" && ok "短格式链接不带 rate（限速由服务端配置）" || bad "短格式链接不应带 rate"
 
@@ -162,7 +162,7 @@ note "测试7：菜单第 7 项开启真 TLS（自签名证书）再关闭"
 openssl req -x509 -newkey rsa:2048 -keyout "$TEST_ROOT/key.pem" -out "$TEST_ROOT/cert.pem" -days 1 -nodes -subj "/CN=test.example" -addext "subjectAltName=DNS:test.example" >/dev/null 2>&1
 run_mm "7\n2\ntest.example\n$TEST_ROOT/cert.pem\n$TEST_ROOT/key.pem\n0\n10\n" | grep -q "开启真 TLS" && ok "开启真 TLS 提示正常" || bad "开启真 TLS 提示不对"
 has "$CFG" "^TLS_DOMAIN=test.example$" && has "$UNIT" "\-\-tls-domain test.example" && ok "配置+服务文件都有 TLS 域名" || bad "TLS 域名没写进配置/服务"
-run_mm '1\n10\n' | grep -q "pin=" && ok "TLS 模式下链接带 pin（短格式，obfs=tls 为 ver=4 默认）" || bad "TLS 模式下链接没有 pin"
+run_mm '1\n10\n' | grep -q "pin=" && ok "TLS 模式下链接带 pin（短格式，obfs=tls 为 ver=5 默认）" || bad "TLS 模式下链接没有 pin"
 run_mm '1\n10\n' | grep -q "test.example" && ok "TLS 模式下链接地址是域名" || bad "TLS 模式下链接地址不是域名"
 run_mm '7\n3\n0\n10\n' | grep -q "关闭真 TLS" && ok "关闭真 TLS 提示正常" || bad "关闭真 TLS 提示不对"
 grep -q "^TLS_DOMAIN=''$" "$CFG" && ! grep -q "tls-domain" "$UNIT" && ok "关闭后配置+服务文件里没了 TLS" || bad "关闭 TLS 后还有残留"
@@ -171,7 +171,7 @@ note "测试7b：菜单第 7 项开启自签 TLS（无域名）再查指纹、�
 run_mm "7\n4\n\n0\n10\n" | grep -q "开启自签 TLS" && ok "开启自签 TLS 提示正常" || bad "开启自签 TLS 提示不对"
 has "$CFG" "^TLS_AUTO=1$" && has "$UNIT" "\\-\\-tls-auto" && ok "配置+服务文件都有 --tls-auto" || bad "自签 TLS 没写进配置/服务"
 has "$UNIT" "tls-cert.pem" && has "$UNIT" "tls-key.pem" && ok "服务文件里自签证书是绝对路径" || bad "自签证书路径不对"
-! run_mm '1\n10\n' | grep -q "obfs=tls-fake" && ok "自签模式下链接不是明文（短格式，obfs=tls 为 ver=4 默认）" || bad "自签模式下链接不对"
+! run_mm '1\n10\n' | grep -q "obfs=tls-fake" && ok "自签模式下链接不是明文（短格式，obfs=tls 为 ver=5 默认）" || bad "自签模式下链接不对"
 run_mm '1\n10\n' | grep -q "pin=" && ok "自签模式下链接带 pin" || bad "自签模式下链接没有 pin"
 run_mm '7\n5\n0\n10\n' | grep -Eq "[A-Za-z0-9_-]{43}" && ok "第 7 项第 5 子项能查到 43 位指纹" || bad "查指纹没拿到 pin"
 run_mm '7\n3\n0\n10\n' | grep -q "关闭自签 TLS" && ok "关闭自签 TLS 提示正常" || bad "关闭自签 TLS 提示不对"
@@ -225,6 +225,20 @@ bash "$SRC_DIR/install-mm-x-server.sh" --port 18132 --traffic-quota 1X < /dev/nu
 [ "$?" != 0 ] && grep -q "流量限额格式不对" "$TEST_ROOT/deploy-traffic-bad2.log" && ok "部署时限额 1X 报错退出" || bad "部署时限额 1X 没报错"
 bash "$SRC_DIR/install-mm-x-server.sh" --port 18132 --rate 3000K --traffic-mode outbound --traffic-period quarterly --traffic-start-day 15 --traffic-limit-mode throttle --traffic-quota 500G --traffic-throttle-rate 1M < /dev/null > "$TEST_ROOT/deploy-noname.log" 2>&1
 [ "$?" = 0 ] && has "$CFG" "^NAME=mm-x$" && ok "不传 --name 且非交互时节点名用默认 mm-x（不卡住等输入）" || bad "不传 --name 时节点名不对（见 deploy-noname.log）"
+# v5 掩护流量：默认 low 应写进配置和服务文件；显式 high 生效；非法值报错退出。
+# 注意：重装会按传入参数全量重写配置，所以下面每次部署都要带上已有的
+# 流量参数（和测试 13 开头那次一样），否则限额/起始日会被重置回默认值，
+# 后面的测试 14（流量菜单）会跟着失败。
+COVER_DEPLOY_FLAGS="--port 18132 --rate 3000K --name 测试节点 --traffic-mode outbound --traffic-period quarterly --traffic-start-day 15 --traffic-limit-mode throttle --traffic-quota 500G --traffic-throttle-rate 1M"
+has "$CFG" "^COVER_TRAFFIC=low$" && has "$UNIT" "\-\-cover-traffic low" && ok "默认掩护流量 low 已写进配置和服务文件" || bad "默认掩护流量 low 没写进配置/服务"
+bash "$SRC_DIR/install-mm-x-server.sh" $COVER_DEPLOY_FLAGS --cover-traffic high < /dev/null > "$TEST_ROOT/deploy-cover-high.log" 2>&1
+[ "$?" = 0 ] && has "$CFG" "^COVER_TRAFFIC=high$" && has "$UNIT" "\-\-cover-traffic high" && ok "--cover-traffic high 写进配置和服务文件" || bad "--cover-traffic high 没生效（见 deploy-cover-high.log）"
+bash "$SRC_DIR/install-mm-x-server.sh" $COVER_DEPLOY_FLAGS --cover-traffic foo < /dev/null > "$TEST_ROOT/deploy-cover-bad.log" 2>&1
+[ "$?" != 0 ] && grep -q "掩护流量档位不合法" "$TEST_ROOT/deploy-cover-bad.log" && ok "部署时掩护档位 foo 报错退出" || bad "部署时掩护档位 foo 没报错"
+bash "$SRC_DIR/install-mm-x-server.sh" $COVER_DEPLOY_FLAGS --cover-traffic low < /dev/null > "$TEST_ROOT/deploy-cover-low.log" 2>&1
+[ "$?" = 0 ] && has "$CFG" "^COVER_TRAFFIC=low$" && ok "掩护档位恢复 low" || bad "掩护档位恢复 low 失败"
+# 恢复 low 后流量参数必须还在（重装没把它们重置掉）。
+has "$CFG" "^TRAFFIC_QUOTA=500G$" && has "$CFG" "^TRAFFIC_START_DAY=15$" && ok "掩护部署后流量限额/起始日还在" || bad "掩护部署后流量参数被重置了"
 
 note "测试14：菜单第 8 项 → 第 11 项流量设置（查看/改限额/非法输入/清零）"
 run_mm '8\n11\n1\n0\n0\n10\n' | grep -q "流量统计（本周期）" && ok "流量设置里查看流量显示统计" || bad "流量设置里查看流量显示不对"
@@ -238,6 +252,16 @@ run_mm '8\n11\n2\nfoo\n0\n0\n10\n' | grep -q "统计模式不对" && ok "统计�
 run_mm '8\n11\n8\ny\n0\n0\n10\n' | grep -q "已清零" && ok "清零本周期流量提示正常" || bad "清零提示不对"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "清零后服务仍在运行" || bad "清零后服务停了"
 "$MM_BIN" --show-traffic 2>/dev/null | grep -q "流量统计（本周期）" && ok "隐藏用法 mm --show-traffic 能显示流量统计" || bad "mm --show-traffic 显示不对"
+
+note "测试14b：菜单第 8 项 → 第 12 项掩护流量（改档位/非法输入/恢复）"
+run_mm '8\n12\nhigh\n0\n10\n' | grep -q "掩护流量改为 high" && ok "改掩护档位提示正常" || bad "改掩护档位提示不对"
+has "$CFG" "^COVER_TRAFFIC=high$" && has "$UNIT" "\-\-cover-traffic high" && ok "配置+服务文件掩护档位已是 high" || bad "掩护档位 high 没写进配置/服务"
+[ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "改掩护档位后服务仍在运行" || bad "改掩护档位后服务停了"
+run_mm '8\n12\nfoo\n0\n10\n' | grep -q "档位不对" && ok "掩护档位 foo 被拒绝" || bad "掩护档位 foo 没被拒绝"
+has "$CFG" "^COVER_TRAFFIC=high$" && ok "非法档位后配置没变" || bad "非法档位后配置被改了"
+run_mm '8\n12\noff\n0\n10\n' | grep -q "掩护流量改为 off" && ok "掩护档位改回 off 提示正常" || bad "掩护档位改回 off 提示不对"
+run_mm '8\n12\nlow\n0\n10\n' | grep -q "掩护流量改为 low" && ok "掩护档位恢复 low" || bad "掩护档位恢复 low 失败"
+has "$CFG" "^COVER_TRAFFIC=low$" && ok "恢复后配置掩护档位是 low" || bad "恢复后配置掩护档位不对"
 
 note "测试15：菜单第 9 项卸载（最后执行）"
 printf '9\ny\n' | "$MM_BIN" | grep -q "已卸载" && ok "卸载提示正常" || bad "卸载提示不对"

@@ -100,6 +100,7 @@ func main() {
 	trafficThrottleStr := flag.String("traffic-throttle-rate", "125K", "TC 限速值：超限后全站降到的速度，例如 1M，默认 125K（约 1 Mbps）")
 	trafficFile := flag.String("traffic-file", "/etc/mmx/traffic.json", "流量计数持久化文件：服务重启不丢计数；空字符串 = 不持久化")
 	trafficStatus := flag.Bool("traffic-status", false, "只打印本周期流量统计然后退出（mm 菜单查看流量用）")
+	coverStr := flag.String("cover-traffic", "low", "掩护流量（v5 会话）：off（关）/ low（默认，空闲时平均约 45 秒一帧小记录）/ high（空闲时平均约 20 秒一帧）")
 	printPin := flag.Bool("print-pin", false, "打印 TLS 证书的 SPKI 指纹（base64url）并退出（mm 菜单查指纹用）")
 	flag.Parse()
 
@@ -191,6 +192,13 @@ func main() {
 			log.Fatalf("突发参数不合法：%v", err)
 		}
 	}
+
+	// 掩护流量档位（v5 会话）：校验失败直接启动失败。
+	coverMode, err := mmx.ParseCoverMode(*coverStr)
+	if err != nil {
+		log.Fatalf("掩护流量：%v", err)
+	}
+	mmx.DefaultCoverMode = coverMode
 
 	// 流量统计与限额配置（校验失败直接启动失败，指明错在哪一项）。
 	trafficCfg := mmx.DefaultTrafficConfig()
@@ -304,7 +312,7 @@ func main() {
 	}
 	// 链接格式：默认 plain（短格式）；opaque 是一串乱码，只有新版
 	// 客户端能认——默认绝不能先切过去，要等客户端版本发了、确认能认
-	// 之后再切（见 PROTOCOL.md“mmx:// 不透明链接格式”一节的上线顺序）。
+	// 之后再切。
 	if *linkFormat != "plain" && *linkFormat != "opaque" {
 		log.Fatalf("链接格式不合法：%q，应为 plain（短格式）或 opaque（不透明链接）", *linkFormat)
 	}
@@ -405,7 +413,7 @@ func main() {
 		}
 	}()
 
-	// 密钥轮换监视：v3/v4 会话是长连接，建好后不再握手——
+	// 密钥轮换监视：v3/v4/v5 会话是长连接，建好后不再握手——
 	// 不处理的话，旧密钥能借着已建好的会话一直用下去，轮换失效。
 	// 发现轮换就按旧密钥的宽限期排一个定时器：宽限期内旧会话照常用
 	//（和 v2“宽限期内旧密钥仍能用”一致），宽限期一到只断开用旧密钥
@@ -507,7 +515,7 @@ func watchTrafficBlock(tc *mmx.TrafficCounter, live *liveConns) {
 }
 
 // watchKeyRotation 监视密钥轮换（A4）：密钥文件变了就按旧密钥的宽限期
-// 安排断开用旧密钥建的 v3/v4 会话。fsnotify 监听文件所在目录
+// 安排断开用旧密钥建的 v3/v4/v5 会话。fsnotify 监听文件所在目录
 // （文件本身可能被原子替换——写临时文件再改名，直接监听文件会丢监听，
 // 监听目录就不会丢）；每次改动都触发一次轮换检查，500ms 内两次改动
 // 以前会漏掉一次，现在不会。再加一个 30 秒的兜底轮询，
@@ -528,12 +536,12 @@ func watchKeyRotation(km *mmx.KeyManager, live *liveConns, pskFile string) {
 			delay := time.Until(expires)
 			if delay <= 0 {
 				closed := live.closeWithKey(prevKey)
-				log.Printf("旧密钥宽限期已过，断开 %d 条用旧密钥建的 v3/v4 会话", closed)
+				log.Printf("旧密钥宽限期已过，断开 %d 条用旧密钥建的 v3/v4/v5 会话", closed)
 				return
 			}
 			time.AfterFunc(delay, func() {
 				closed := live.closeWithKey(prevKey)
-				log.Printf("旧密钥宽限期已过，断开 %d 条用旧密钥建的 v3/v4 会话", closed)
+				log.Printf("旧密钥宽限期已过，断开 %d 条用旧密钥建的 v3/v4/v5 会话", closed)
 			})
 		}
 	}
@@ -785,14 +793,14 @@ func serveMMX(pc *peekConn, km *mmx.KeyManager, serverRate, serverBurst int64, b
 	}
 	log.Printf("[%s] 握手成功（ver=%d）", remote, keys.Version)
 	if mmx.IsMuxVersion(keys.Version) {
-		// 登记这条 v3/v4 会话和它用的密钥：旧密钥宽限期一到，
+		// 登记这条 v3/v4/v5 会话和它用的密钥：旧密钥宽限期一到，
 		// 监视 goroutine 只断开用旧密钥建的会话。
 		live.add(pc, keys.PSK)
 		defer live.remove(pc)
 		if err := mmx.ServeMuxSession(mc, serverRate, serverBurst, remote, allowPrivate, mmx.SessionIdleTimeout, tc); err != nil {
-			log.Printf("[%s] v3/v4 会话结束：%v", remote, err)
+			log.Printf("[%s] v3/v4/v5 会话结束：%v", remote, err)
 		} else {
-			log.Printf("[%s] v3/v4 会话结束", remote)
+			log.Printf("[%s] v3/v4/v5 会话结束", remote)
 		}
 		return
 	}

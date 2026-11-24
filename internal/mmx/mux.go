@@ -19,11 +19,13 @@
 package mmx
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"strconv"
 	"sync"
@@ -96,13 +98,20 @@ func (f *frameConn) SetDeadline(t time.Time) error      { return f.c.SetDeadline
 func (f *frameConn) SetReadDeadline(t time.Time) error  { return f.c.SetReadDeadline(t) }
 func (f *frameConn) SetWriteDeadline(t time.Time) error { return f.c.SetWriteDeadline(t) }
 
-// YamuxConfig 是复用会话的配置：keepalive 30 秒（死会话及时发现，
+// YamuxConfig 是复用会话的配置：keepalive（死会话及时发现，
 // 客户端会话池靠它知道该重拨）；日志丢弃（yamux 默认往 stderr 写，
 // 服务端日志里不要混进复用库的噪音）。
+// keepalive 间隔每会话随机 25–50 秒（原来固定 30 秒）：
+// 固定周期的小记录本身就是一个时序特征，随机化把它抹掉。
+// 间隔用 crypto/rand 现抽——它就是线上能观测到的量。
 func YamuxConfig() *yamux.Config {
 	cfg := yamux.DefaultConfig()
 	cfg.EnableKeepAlive = true
-	cfg.KeepAliveInterval = 30 * time.Second
+	jitter, err := rand.Int(rand.Reader, big.NewInt(26))
+	if err != nil {
+		jitter = big.NewInt(0)
+	}
+	cfg.KeepAliveInterval = time.Duration(25+jitter.Int64()) * time.Second
 	cfg.LogOutput = io.Discard
 	return cfg
 }
@@ -460,13 +469,16 @@ func serveMuxUDP(stream net.Conn, target string, lim *Limiter, remote string, al
 
 // ClientSession 是一条 v3 复用会话：一条 TCP（或 TLS）连接 + yamux，
 // 上面开多条流；会话级限速器由会话里所有流共用。
+// createdAt 是会话拨通的时间（会话轮换用：太老的会话在空闲时重拨，
+// 避免一条连接一跑就是几小时——真实浏览器的连接没这么长寿）。
 type ClientSession struct {
-	cfg    *LinkConfig
-	raw    net.Conn
-	ys     *yamux.Session
-	lim    *Limiter
-	closed chan struct{}
-	once   sync.Once
+	cfg       *LinkConfig
+	raw       net.Conn
+	ys        *yamux.Session
+	lim       *Limiter
+	closed    chan struct{}
+	once      sync.Once
+	createdAt time.Time
 }
 
 // DialAndHandshake 拨号 + mm-x 握手（C5）：域名解析出多个 IP 时逐个试，
@@ -482,8 +494,11 @@ func DialAndHandshake(cfg *LinkConfig, badMagic, badVersion, tlsInsecure bool) (
 	}
 	var lastErr error
 	var firstHandshakeErr error
+	// SNI 按会话定一次（v5 + IP host 时每会话轮换，见 SessionSNI），
+	// 同一次拨号里的多个 IP 尝试共用同一个 SNI。
+	sni := SessionSNI(cfg)
 	for _, ip := range ips {
-		raw, keys, tcpOK, err := dialAndHandshakeIP(cfg, ip, badMagic, badVersion, tlsInsecure)
+		raw, keys, tcpOK, err := dialAndHandshakeIP(cfg, ip, sni, badMagic, badVersion, tlsInsecure)
 		if err == nil {
 			return raw, keys, nil
 		}
@@ -499,8 +514,10 @@ func DialAndHandshake(cfg *LinkConfig, badMagic, badVersion, tlsInsecure bool) (
 }
 
 // dialAndHandshakeIP 对一个 IP 做一次拨号 + mm-x 握手。
+// sni 是本次会话定好的 SNI（调用方 SessionSNI 算好传进来，
+// 多个 IP 尝试共用同一个）。
 // 返回 tcpOK 表示 TCP 是否接通：接通后握手失败 = 服务端明确拒绝。
-func dialAndHandshakeIP(cfg *LinkConfig, ip string, badMagic, badVersion, tlsInsecure bool) (net.Conn, *SessionKeys, bool, error) {
+func dialAndHandshakeIP(cfg *LinkConfig, ip, sni string, badMagic, badVersion, tlsInsecure bool) (net.Conn, *SessionKeys, bool, error) {
 	var raw net.Conn
 	var err error
 	if cfg.Obfs == "tls" {
@@ -509,7 +526,7 @@ func dialAndHandshakeIP(cfg *LinkConfig, ip string, badMagic, badVersion, tlsIns
 			pin = FormatPIN(cfg.PIN)
 		}
 		var tcpOK bool
-		raw, tcpOK, err = DialTLSWithPinIP(ip, cfg.Port, ResolveSNI(cfg), pin, 5*time.Second, tlsInsecure)
+		raw, tcpOK, err = DialTLSWithPinIP(ip, cfg.Port, sni, pin, 5*time.Second, tlsInsecure)
 		if err != nil {
 			return nil, nil, tcpOK, fmt.Errorf("连接服务端失败：%v", err)
 		}
@@ -549,8 +566,9 @@ func DialSession(cfg *LinkConfig, badMagic, badVersion, badKey, tlsInsecure bool
 	}
 	return &ClientSession{
 		cfg: cfg, raw: raw, ys: ys,
-		lim:    NewLimiter(cfg.Rate, cfg.Burst),
-		closed: make(chan struct{}),
+		lim:       NewLimiter(cfg.Rate, cfg.Burst),
+		closed:    make(chan struct{}),
+		createdAt: time.Now(),
 	}, nil
 }
 
@@ -613,14 +631,27 @@ func (s *ClientSession) Relay(local, stream net.Conn) {
 // SessionPool 是客户端的会话池：同一条链接只留一条会话，
 // 多个 SOCKS5 请求共用它（复用的意义就在于此）。
 // 键是整条链接文本（里面有密钥和全部参数，只在内存里用，不记日志）。
+// maxAge 是会话轮换的最长存活（0 = 不轮换）：超过这个时间的会话，
+// 下次 Get 时如果正好没有流在跑，就关掉重拨一条新的——
+// 一条连接一跑几小时本身就是特征，真实浏览器会不断开新连接。
+// 只在“没有流在跑”的空闲时刻轮换，正在传的流不会被打断；
+// 如果一直有流在跑，轮换就一直等下去（不断流、不丢数据）。
 type SessionPool struct {
-	mu sync.Mutex
-	m  map[string]*ClientSession
+	mu     sync.Mutex
+	m      map[string]*ClientSession
+	maxAge time.Duration
 }
 
-// NewSessionPool 新建会话池。
+// NewSessionPool 新建会话池（默认不轮换；命令行客户端用 SetMaxAge 开）。
 func NewSessionPool() *SessionPool {
 	return &SessionPool{m: make(map[string]*ClientSession)}
+}
+
+// SetMaxAge 设置会话轮换的最长存活（<=0 = 不轮换）。
+func (p *SessionPool) SetMaxAge(d time.Duration) {
+	p.mu.Lock()
+	p.maxAge = d
+	p.mu.Unlock()
 }
 
 // sessionKey 会话池的键：短链接 + 影响会话行为的字段。
@@ -641,7 +672,17 @@ func (p *SessionPool) Get(cfg *LinkConfig, badMagic, badVersion, badKey, tlsInse
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if s, ok := p.m[key]; ok && !s.IsClosed() {
-		return s, nil
+		// 会话轮换：太老 + 正好没有流在跑 → 关掉重拨。
+		// 有流在跑时不轮换（不断流）；轮换只多一次握手（约 100ms），
+		// 感觉不到。注意这里有个极小的竞态：判断完没流、还没关掉的
+		// 瞬间可能有新流进来——那条流会在关会话时收到错误，
+		// 浏览器/客户端重发一次即可，单用户可接受。
+		if p.maxAge > 0 && time.Since(s.createdAt) > p.maxAge && s.NumStreams() == 0 {
+			delete(p.m, key)
+			_ = s.Close()
+		} else {
+			return s, nil
+		}
 	}
 	if old, ok := p.m[key]; ok {
 		// 池里那条已经死了：清掉再拨。

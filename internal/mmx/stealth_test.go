@@ -89,12 +89,12 @@ func TestDataFrameChunking(t *testing.T) {
 	defer cc.Close()
 	defer sc.Close()
 
-	// 40000 字节一次写出：按本连接画像的分片上限切帧
+	// 40000 字节一次写出：按本连接实际的分片上限切帧
 	// （旧版固定 16000 时是 16000/16000/8000 三帧；画像改后分片
-	// 上限因 PSK 而异，帧数 = ceil(40000 / 画像分片上限），
-	// 这里按实际画像算期望帧数，不再硬编码 3 帧）。
+	// 上限因 PSK 而异，v5 又改成每会话连续随机值——
+	// 这里按连接实际生效的上限算期望帧数，不再硬编码 3 帧）。
 	// 接收方按顺序读回，拼起来和原文完全一致（流语义不变）。
-	expectedFrames := (40000 + cc.Profile().MaxDataPayload - 1) / cc.Profile().MaxDataPayload
+	expectedFrames := (40000 + cc.maxDataPayload() - 1) / cc.maxDataPayload()
 	data := make([]byte, 40000)
 	for i := range data {
 		data[i] = byte(i % 251)
@@ -133,9 +133,10 @@ func TestRecordNeverExceedsTLSMax(t *testing.T) {
 		done <- cc.WriteFrame(FrameData, data)
 	}()
 	// 直接在原始连接上按 TLS 记录读：每条记录都不超过 16384 字节
-	// （真实 TLS 1.2 的记录上限），记录数 = ceil(40000 / 画像分片上限）
-	// （旧版固定 16000 时正好是 3 条；画像改后按实际画像算）。
-	expectedRecords := (40000 + cc.Profile().MaxDataPayload - 1) / cc.Profile().MaxDataPayload
+	// （真实 TLS 1.2 的记录上限），记录数 = ceil(40000 / 实际分片上限）
+	// （旧版固定 16000 时正好是 3 条；画像改后按实际画像算；
+	// v5 是每会话连续随机值，按连接实际生效的上限算）。
+	expectedRecords := (40000 + cc.maxDataPayload() - 1) / cc.maxDataPayload()
 	records := 0
 	total := 0
 	for total < 40000+expectedRecords*(12+6+63+16) { // 粗略上限：每条记录的密文开销
