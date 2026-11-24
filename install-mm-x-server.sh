@@ -5,7 +5,7 @@
 #   2) sudo ./install-mm-x-server.sh [--port 端口] [--rate 限速] [--burst 突发] [--name 节点名] [--host 公网IP或域名]
 #      [--fallback site|silent] [--tls-domain 域名 --tls-cert 证书 --tls-key 私钥]
 #      [--tls-auto [--tls-sni 域名]]（没域名时用自签 TLS + SPKI 锁定，和真 TLS 二选一）
-# 默认：随机高位端口（10000-60000）、限速 6250K（50 Mbps，约 6.25 MB/s，1080p、4K30、4K60 都能看）、突发 0（严格模式：任何时候都不超过限速；旧默认 15M 会让每条新连接开头先冲 15MB 再限速，实测 30MB 文件平均跑到 96 Mbps、峰值 1300 Mbps，等于没限——YouTube 这种多连接、分段取数据的流量，每段都落在突发里，更是全程不限）。
+# 默认：随机高位端口（10000-60000）、不限速（rate=0；想限速再传 --rate，例如 6250K = 50 Mbps）、突发 0（严格模式：限速时任何时候都不超过限速；旧默认 15M 会让每条新连接开头先冲 15MB 再限速，实测 30MB 文件平均跑到 96 Mbps、峰值 1300 Mbps，等于没限——YouTube 这种多连接、分段取数据的流量，每段都落在突发里，更是全程不限）。
 # 脚本会：装二进制到 /usr/local/bin/mmx-server；生成/保留 /etc/mmx/psk（重装不换密钥，
 #   旧密钥靠服务端的 24 小时宽限期继续用）；默认开 BBR（开不了只警告）；放行防火墙端口；
 #   写 /etc/mmx/config（全部参数都在这里，菜单改参数就改这个文件）；写 systemd 服务
@@ -25,7 +25,7 @@ UNIT_DIR="$ROOT/etc/systemd/system"
 UNIT_FILE="$UNIT_DIR/mmx-server.service"
 
 PORT=""
-RATE="6250K"
+RATE="0"
 BURST="0"
 NAME="mm-x"
 NAME_SET="0" # --name 传过就置 1，没传时安装会交互问一句（只在终端里问）
@@ -58,7 +58,7 @@ usage() {
   echo "  --port   监听端口，默认随机 10000-60000（不要用一眼能猜到的端口）"
   echo "           443 更像正常 HTTPS（配真 TLS 时最像），但 VPS 上 443 常被 nginx/Apache 等 Web 服务占着："
   echo "           被占时本脚本会直接报错停下，先停掉占用的服务（例如 systemctl stop nginx）或换个端口再装"
-  echo "  --rate   服务端限速上限，默认 6250K（50 Mbps，约 6.25 MB/s；0 = 不限速）"
+  echo "  --rate   服务端限速上限，默认 0（不限速；想限速再填，例如 6250K = 50 Mbps，约 6.25 MB/s）"
   echo "  --burst  服务端突发额度上限，默认 0（严格模式：任何时候都不超过限速；想允许开头冲一把再填，例如 --burst 5M）"
   echo "  --name   节点名，默认 mm-x；不传时安装会问一句（留空用默认 mm-x），"
   echo "           只在终端里问——一键命令管道/自动化时不问，直接用默认，不卡住等输入"
@@ -373,7 +373,7 @@ UNIT_FILE="$UNIT_DIR/mmx-server.service"
 MYNAME="$(basename "$0")"
 
 # 默认值（配置文件缺失时用；老配置没有流量字段时也按这些默认走）
-PORT=""; RATE="6250K"; BURST="0"; NAME="mm-x"; HOST=""
+PORT=""; RATE="0"; BURST="0"; NAME="mm-x"; HOST=""
 FALLBACK="site"; TLS_DOMAIN=""; TLS_CERT=""; TLS_KEY=""
 TLS_AUTO="0"; TLS_SNI=""
 WHITELIST_IPS=""; WHITELIST_FILE=""; ALLOW_IPS=""; ALLOWLIST_FILE=""
