@@ -170,10 +170,14 @@ TLS_MODE_DESC="关"
 [ "$TLS_AUTO" = "1" ] && TLS_MODE_DESC="自签 TLS（SNI ${TLS_SNI:-www.microsoft.com}）"
 echo "端口：$PORT；限速：$RATE；突发：$BURST；节点名：$NAME；回退：$FALLBACK；TLS：$TLS_MODE_DESC"
 
-# 1) 装二进制
+# 1) 装二进制（更新模式下 BIN 就是已安装的文件，跳过自复制）
 mkdir -p "$BIN_DIR"
-install -m 755 "$BIN" "$BIN_DIR/mm1-server"
-echo "二进制已安装：$BIN_DIR/mm1-server"
+if [ "$BIN" != "$BIN_DIR/mm1-server" ]; then
+  install -m 755 "$BIN" "$BIN_DIR/mm1-server"
+  echo "二进制已安装：$BIN_DIR/mm1-server"
+else
+  echo "更新模式：二进制已在安装位置，不重复安装"
+fi
 
 # 2) 密钥：/etc/mm1/psk 没有就生成（64 位十六进制，32 字节），有了就保留——
 #    重装/更新不换密钥，轮换密钥请用 mm 菜单第 4 项（服务端 24 小时宽限期内新旧密钥都能用）
