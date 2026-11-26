@@ -11,7 +11,7 @@
 # 脚本会：装二进制到 /usr/local/bin/mmx-server；生成/保留 /etc/mmx/psk（重装不换密钥，
 #   旧密钥靠服务端的 24 小时宽限期继续用）；默认开 BBR（开不了只警告）；放行防火墙端口；
 #   写 /etc/mmx/config（全部参数都在这里，菜单改参数就改这个文件）；写 systemd 服务
-#   （开机自启、崩溃自动重启）；装管理菜单 /usr/local/bin/mm（输入 mm 呼出）。
+#   （开机自启、崩溃自动重启）；装管理菜单 /usr/local/bin/mmx（输入 mmx 呼出）。
 # 安装完不打印 mmx:// 链接——链接在 mm 菜单第 1 项里看。
 # 重装/更新：直接再跑一次本脚本即可，密钥文件不动，服务会自动重启加载新二进制。
 set -euo pipefail
@@ -357,22 +357,22 @@ ALLOW_IPS_STR="${ALLOW_IPS[*]:-}"
 chmod 600 "$CFG_FILE"
 echo "配置文件已写入：$CFG_FILE"
 
-# 8) 写管理菜单 /usr/local/bin/mm：输入 mm 呼出。
+# 8) 写管理菜单 /usr/local/bin/mmx：输入 mmx 呼出。
 #    菜单是一个独立的 bash 脚本；配置存在 /etc/mmx/config，密钥在 /etc/mmx/psk，
 #    systemd 服务由菜单按配置文件生成（改参数后自动重载 + 重启，重启失败自动回滚）。
 echo "== 安装管理菜单 =="
-cat > "$BIN_DIR/mm" <<'MM_MENU_EOF'
+cat > "$BIN_DIR/mmx" <<'MM_MENU_EOF'
 #!/bin/bash
-# mm-x 服务端管理菜单：在 VPS 上输入 mm 呼出。
+# mm-x 服务端管理菜单：在 VPS 上输入 mmx 呼出。
 # 功能：1 显示协议链接  2 查看服务状态  3 重启服务  4 更换密钥  5 修改限速
 #       6 查看最近日志  7 诱饵回退 / TLS 设置（真 TLS、自签 TLS、查指纹）  8 修改节点参数（含流量设置）
 #       9 卸载  10 退出
 # 全部配置存在 /etc/mmx/config，密钥在 /etc/mmx/psk；
 # systemd 服务由本脚本按配置文件生成，改参数后自动重载 + 重启，
 # 重启失败自动回滚到改之前的配置，不会让服务起不来。
-# 隐藏用法（给部署脚本和脚本调用）：mm --write-service（按配置写服务文件）、mm --show-link [plain|opaque]（只打印链接，
+# 隐藏用法（给部署脚本和脚本调用）：mmx --write-service（按配置写服务文件）、mmx --show-link [plain|opaque]（只打印链接，
 # 默认 opaque 不透明链接；plain 是短格式，只在显式指定时用）、
-# mm --show-pin（只打印 TLS 证书的 SPKI 指纹）、mm --show-traffic（打印本周期流量统计）。
+# mmx --show-pin（只打印 TLS 证书的 SPKI 指纹）、mmx --show-traffic（打印本周期流量统计）。
 set -u
 
 ROOT="${MMX_TEST_ROOT:-}"
@@ -662,7 +662,7 @@ show_logs() {
 
 # 查看流量：调服务端程序现算（mmx-server --traffic-status），
 # 计数存在 /etc/mmx/traffic.json，服务重启不丢；服务还没跑过时显示 0。
-# 用法：show_traffic（交互菜单里用），隐藏用法 mm --show-traffic 也走这里。
+# 用法：show_traffic（交互菜单里用），隐藏用法 mmx --show-traffic 也走这里。
 show_traffic() {
   load_config
   if [ ! -x "$SERVER_BIN" ]; then echo "服务端程序不在：$SERVER_BIN（被删了？请重装）"; return 1; fi
@@ -1064,12 +1064,14 @@ main() {
 
 main "$@"
 MM_MENU_EOF
-chmod +x "$BIN_DIR/mm"
-echo "管理菜单已安装：$BIN_DIR/mm（输入 mm 呼出）"
+chmod +x "$BIN_DIR/mmx"
+# 兼容旧习惯：mm 仍可用（软链接到 mmx）
+ln -sf "$BIN_DIR/mmx" "$BIN_DIR/mm"
+echo "管理菜单已安装：$BIN_DIR/mmx（输入 mmx 呼出，旧的 mm 也能用）"
 
 # 9) systemd 服务：按配置文件生成（菜单改参数也是同一份逻辑），开机自启、崩溃自动重启
 echo "== 写入 systemd 服务 =="
-"$BIN_DIR/mm" --write-service
+"$BIN_DIR/mmx" --write-service
 mkdir -p "$UNIT_DIR"
 systemctl daemon-reload
 systemctl enable mmx-server >/dev/null 2>&1
@@ -1096,4 +1098,4 @@ echo "密钥文件：$PSK_FILE（重装不换密钥；轮换密钥：mm 菜单�
 echo "配置文件：$CFG_FILE（菜单改参数就改这个文件）"
 echo "服务状态：mm 菜单第 2 项，或 systemctl status mmx-server；日志：mm 菜单第 6 项，或 journalctl -u mmx-server -f"
 echo ""
-echo "输入 mm 打开管理菜单，在菜单第 1 项查看协议链接（粘贴到 mm-x 客户端就能用，绝不要分享给第二个人）。"
+echo "输入 mmx 打开管理菜单，在菜单第 1 项查看协议链接（粘贴到 mm-x 客户端就能用，绝不要分享给第二个人）。"
