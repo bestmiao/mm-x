@@ -1,8 +1,10 @@
 #!/bin/bash
 # mm-x 服务端一键部署脚本（在 VPS 上用 sudo 运行）。
-# 用法：
-#   1) 把本脚本和预编译的 mmx-server-linux-amd64 传到 VPS 同一个目录（例如 /tmp/mmx/）；
-#   2) sudo ./install-mm-x-server.sh [--port 端口] [--rate 限速] [--burst 突发] [--name 节点名] [--host 公网IP或域名]
+# 用法（一键）：
+#   curl -fsSL https://raw.githubusercontent.com/bestmiao/mm-x/main/install-mm-x-server.sh | sudo bash
+#   （没找到本地二进制时脚本自己从 GitHub 下载；想手动装也可以把本脚本和
+#   预编译的 mmx-server-linux-amd64 放到同一个目录再 sudo 运行）
+#   sudo ./install-mm-x-server.sh [--port 端口] [--rate 限速] [--burst 突发] [--name 节点名] [--host 公网IP或域名]
 #      [--fallback site|silent] [--tls-domain 域名 --tls-cert 证书 --tls-key 私钥]
 #      [--tls-auto [--tls-sni 域名]]（没域名时用自签 TLS + SPKI 锁定，和真 TLS 二选一）
 # 默认：随机高位端口（10000-60000）、不限速（rate=0；想限速再传 --rate，例如 6250K = 50 Mbps）、突发 0（严格模式：限速时任何时候都不超过限速；旧默认 15M 会让每条新连接开头先冲 15MB 再限速，实测 30MB 文件平均跑到 96 Mbps、峰值 1300 Mbps，等于没限——YouTube 这种多连接、分段取数据的流量，每段都落在突发里，更是全程不限）。
@@ -217,9 +219,20 @@ if [ -z "$BIN" ]; then
   elif [ -x "$BIN_DIR/mmx-server" ]; then
     BIN="$BIN_DIR/mmx-server"  # 更新模式：只重装服务配置，不换二进制
   else
-    echo "找不到服务端二进制：请把 mmx-server-linux-amd64 和本脚本放在同一个目录再运行，"
-    echo "或用 --bin 指定二进制路径。"
-    exit 1
+    # 没找到二进制：自己从 GitHub 下一个（供一键命令 curl | bash 用）
+    echo "本地没有服务端二进制，正在从 GitHub 下载…"
+    if ! command -v curl >/dev/null 2>&1; then
+      echo "下载二进制需要 curl，请先安装 curl，或把 mmx-server-linux-amd64 和本脚本放在同一个目录再运行。"
+      exit 1
+    fi
+    DL_DIR="$(mktemp -d)"
+    if curl -fsSL -o "$DL_DIR/mmx-server-linux-amd64" "https://raw.githubusercontent.com/bestmiao/mm-x/main/mmx-server-linux-amd64"; then
+      chmod +x "$DL_DIR/mmx-server-linux-amd64"
+      BIN="$DL_DIR/mmx-server-linux-amd64"
+    else
+      echo "下载服务端二进制失败，请检查网络，或把 mmx-server-linux-amd64 和本脚本放在同一个目录再运行。"
+      exit 1
+    fi
   fi
 fi
 if [ ! -f "$BIN" ]; then echo "服务端二进制不存在：$BIN"; exit 1; fi
