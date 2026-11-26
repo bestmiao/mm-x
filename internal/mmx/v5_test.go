@@ -487,27 +487,14 @@ func TestV5CoverLoop(t *testing.T) {
 	sRaw2.Close()
 }
 
-// TestV5SessionSNI：v5 + IP host 时 SNI 每会话轮换；
-// v4 还是固定默认 SNI；链接写了 SNI 就用链接的；host 是域名就用 host。
+// TestV5SessionSNI：SNI 不再按会话轮换（2026-11-26 评审指出轮换反而更异常）；
+// v5 + IP host 也用默认单一 SNI；链接写了 SNI 就用链接的；host 是域名就用 host。
 func TestV5SessionSNI(t *testing.T) {
 	v5 := &LinkConfig{Host: "203.0.113.5", Port: 37394, Version: VersionV5}
-	seen := map[string]bool{}
 	for i := 0; i < 100; i++ {
-		s := SessionSNI(v5)
-		seen[s] = true
-		found := false
-		for _, want := range RotatedSNIs {
-			if s == want {
-				found = true
-				break
-			}
+		if got := SessionSNI(v5); got != DefaultSNI {
+			t.Fatalf("v5 + IP host 应固定用默认 SNI %q，实际 %q（不应再轮换）", DefaultSNI, got)
 		}
-		if !found {
-			t.Fatalf("轮换 SNI %q 不在候选列表里", s)
-		}
-	}
-	if len(seen) < 2 {
-		t.Fatalf("100 次 SNI 只抽到 %d 种，应至少 2 种（轮换在起作用）", len(seen))
 	}
 	v4 := &LinkConfig{Host: "203.0.113.5", Port: 37394, Version: VersionV4}
 	if got := SessionSNI(v4); got != DefaultSNI {

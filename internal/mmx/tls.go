@@ -168,6 +168,9 @@ func ReissueSelfSignedCert(certFile, keyFile, sniHost string) (tls.Certificate, 
 // issueSelfSignedCert 用给定的私钥签发一张自签证书并存到 certFile。
 // 模板只写 CN 和一个 DNS SAN（都是 SNI 主机名），不写 Organization、
 // 不写 localhost、不写回环 IP SAN——证书本身不能泄露协议身份。
+// KeyUsage 只写 DigitalSignature：ECDSA 密钥做不了 KeyEncipherment，
+// 写上它反而是特征（2026-11-26 评审指出）。有效期 1 年：10 年有效期
+// 也是特征，公开 CA 的证书最长也就 398 天；注意换证书要换链接里的 pin。
 func issueSelfSignedCert(certFile, sniHost string, priv *ecdsa.PrivateKey) (tls.Certificate, error) {
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
@@ -178,8 +181,8 @@ func issueSelfSignedCert(certFile, sniHost string, priv *ecdsa.PrivateKey) (tls.
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: sniHost},
 		NotBefore:    now.Add(-time.Hour),
-		NotAfter:     now.Add(10 * 365 * 24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		NotAfter:     now.Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		DNSNames:     []string{sniHost},
 	}
@@ -370,17 +373,10 @@ func ResolveSNI(cfg *LinkConfig) string {
 	return DefaultSNI
 }
 
-// RotatedSNIs 是 v5 会话轮换用的 SNI 候选：一组常见大网站域名。
-// 针对的特征：原来每个会话的 SNI 都是 www.microsoft.com，
-// 一个 IP 上所有会话永远同一个 SNI——被动分析一眼就能把流量
-// 归到同一个目的地。轮换后同一 IP 上的会话 SNI 各不相同，
-// 看起来像 CDN/共享主机后面的多个网站。
-// 安全上没代价：pin 模式不校验主机名（只认 pin + 证书有效期），
-// SNI 换哪个都不影响证书校验；服务端也不按 SNI 选证书。
-// 局限：主动探测完成 TLS 握手后看到的仍是同一张自签证书
-// （CN=www.microsoft.com），SNI 和证书域名对不上——但自签证书
-// 本身就已经是主动探测下的识别点，SNI 轮换没有让它更糟；
-// 真想堵住这一点要开真 TLS 模式（自己的域名 + 真证书）。
+// RotatedSNIs 是 v5 会话轮换用的 SNI 候选，已废弃（2026-11-26 评审指出：
+// 同一个 VPS IP 上一会儿 apple 一会儿 microsoft，反而更像异常；
+// 真正的 CDN IP 挂多域名才正常，这台 VPS 的 IP 不是 CDN 的 IP）。
+// 保留这个变量只是为了兼容旧代码引用，SessionSNI 已不再用它轮换。
 var RotatedSNIs = []string{
 	"www.microsoft.com",
 	"www.apple.com",
@@ -391,6 +387,7 @@ var RotatedSNIs = []string{
 }
 
 // RandomRotatedSNI 从轮换候选里随机挑一个 SNI（每会话现抽）。
+// 已废弃：SessionSNI 不再轮换，保留仅作兼容。
 func RandomRotatedSNI() string {
 	if len(RotatedSNIs) == 0 {
 		return DefaultSNI
@@ -400,12 +397,9 @@ func RandomRotatedSNI() string {
 
 // SessionSNI 决定一次会话握手用的 SNI：
 //   - 链接写了 sni：用它（用户指定的最优先）；
-//   - host 是域名：用 host（真证书模式，SNI 必须和证书域名一致，不轮换）；
-//   - v5 + host 是 IP：从轮换候选里随机挑一个（每会话不同）；
-//   - 其余情况：默认常见域名（v4 及以前的行为不变）。
+//   - host 是域名：用 host（真证书模式，SNI 必须和证书域名一致）；
+//   - 其余情况：默认常见域名 www.microsoft.com（和证书 CN 一致）。
+// 不再按会话轮换（2026-11-26 评审指出轮换反而更异常，改回单一 SNI）。
 func SessionSNI(cfg *LinkConfig) string {
-	if cfg.Version >= VersionV5 && cfg.SNI == "" && cfg.Host != "" && net.ParseIP(cfg.Host) != nil {
-		return RandomRotatedSNI()
-	}
 	return ResolveSNI(cfg)
 }

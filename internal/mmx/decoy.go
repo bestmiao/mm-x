@@ -40,9 +40,26 @@ const decoyHTML = `<!DOCTYPE html>
 `
 
 // decoy400HTML 是诱饵站的 400 错误页：发来 TLS 握手或乱字节时回这个。
-const decoy400HTML = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>400 Bad Request</title></head>
-<body><h1>400 Bad Request</h1><p>请求有误，服务器无法理解。</p></body></html>
+// 按真 nginx 默认错误页的格式写（英文 + 底部 nginx 署名），中文自制页
+// 一眼就能认出来（2026-11-26 评审指出）。
+const decoy400HTML = `<html>
+<head><title>400 Bad Request</title></head>
+<body>
+<center><h1>400 Bad Request</h1></center>
+<hr><center>nginx/1.18.0</center>
+</body>
+</html>
+`
+
+// decoy404HTML 是诱饵站的 404 错误页：不存在的路径回这个，不再什么都回 200。
+// 真站对不存在的路径回 404，任意路径都回 200 本身就是特征（2026-11-26 评审指出）。
+const decoy404HTML = `<html>
+<head><title>404 Not Found</title></head>
+<body>
+<center><h1>404 Not Found</h1></center>
+<hr><center>nginx/1.18.0</center>
+</body>
+</html>
 `
 
 var httpMethods = []string{
@@ -77,14 +94,20 @@ func decoyHeaders() string {
 	return fmt.Sprintf("Date: %s\r\nServer: %s\r\n", time.Now().UTC().Format(http.TimeFormat), decoyServer)
 }
 
-// ServeDecoySite 读完一个 HTTP 请求（最多 8KB 请求头），回 200 + 诱饵页面。
+// ServeDecoySite 读完一个 HTTP 请求（最多 8KB 请求头），回诱饵页面。
+// 只有 / 和 /index.html 回 200 + 首页，其他路径回 404——真站就是这样，
+// 任意路径都回 200 本身就是特征（2026-11-26 评审指出）。
 // r 是已 peek 过的缓冲读端，w 是同一条连接的写端。
 func ServeDecoySite(r *bufio.Reader, w io.Writer) error {
 	total := 0
+	requestLine := ""
 	for {
 		line, err := r.ReadString('\n')
 		if err != nil {
 			return err
+		}
+		if requestLine == "" {
+			requestLine = strings.TrimRight(line, "\r\n")
 		}
 		total += len(line)
 		if total > 8192 {
@@ -94,9 +117,20 @@ func ServeDecoySite(r *bufio.Reader, w io.Writer) error {
 			break
 		}
 	}
-	body := fmt.Sprintf(decoyHTML, time.Now().Format("2006-01-02"))
-	resp := fmt.Sprintf("HTTP/1.1 200 OK\r\n%sContent-Type: text/html; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
-		decoyHeaders(), len(body), body)
+	// 请求行：METHOD /path HTTP/x.y，取中间那段当路径。
+	path := ""
+	if fields := strings.Fields(requestLine); len(fields) >= 2 {
+		path = fields[1]
+	}
+	if path == "/" || path == "/index.html" || path == "/index.htm" {
+		body := fmt.Sprintf(decoyHTML, time.Now().Format("2006-01-02"))
+		resp := fmt.Sprintf("HTTP/1.1 200 OK\r\n%sContent-Type: text/html; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+			decoyHeaders(), len(body), body)
+		_, err := io.WriteString(w, resp)
+		return err
+	}
+	resp := fmt.Sprintf("HTTP/1.1 404 Not Found\r\n%sContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		decoyHeaders(), len(decoy404HTML), decoy404HTML)
 	_, err := io.WriteString(w, resp)
 	return err
 }
