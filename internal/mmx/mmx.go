@@ -577,8 +577,11 @@ func BuildOpaqueLink(cfg *LinkConfig) string {
 	default: // tls
 		blob = append(blob, opaqueObfsTLS)
 	}
-	// SNI 标志：默认域名或空写 0，否则写 1 + 长度 + 字节。
-	if cfg.SNI == "" || cfg.SNI == DefaultSNI {
+	// SNI 标志：空写 0；默认域名时，只有 host 是 IP 才写 0（IP host 下
+	// ResolveSNI 本来就会回落到默认 SNI，省略无损），host 是域名时必须
+	// 写进去——否则解析回来 SNI 为空，ResolveSNI 会回落到 host 域名，
+	// 有效 SNI 就变了（2026-11-26 fuzz 发现的边界情况）。
+	if cfg.SNI == "" || (cfg.SNI == DefaultSNI && net.ParseIP(cfg.Host) != nil) {
 		blob = append(blob, 0)
 	} else {
 		blob = append(blob, 1, byte(len(cfg.SNI)))

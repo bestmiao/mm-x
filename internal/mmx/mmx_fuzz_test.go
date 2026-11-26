@@ -257,19 +257,13 @@ func FuzzOpaqueLinkRoundTrip(f *testing.F) {
 		if got.Obfs != effectiveObfs(cfg.Version, cfg.Obfs) {
 			t.Fatalf("往返后混淆变了：%q，想要 %q", got.Obfs, effectiveObfs(cfg.Version, cfg.Obfs))
 		}
-		// SNI：链接里“默认或空”都省略（flag 0），解析回来是空串；
-		// 所以只比“写进链接的 SNI”（空/DefaultSNI 都算省略），不比 ResolveSNI。
-		// 注意（fuzz 发现的边界情况，见回报）：如果 SNI 被显式设成 DefaultSNI
-		// 且 host 是域名，链接会省略它，解析后 ResolveSNI 会回落到 host 域名
-		// 而不是 DefaultSNI——有效 SNI 在往返后会变。这是链接格式“省略默认值”
-		// 与 ResolveSNI“空 SNI 时用 host 域名”两条规则叠加的结果，host 为 IP
-		// 时不受影响（IP 不会成为 SNI，会回落到 DefaultSNI）。
-		linkSNI := cfg.SNI
-		if linkSNI == DefaultSNI {
-			linkSNI = ""
-		}
-		if got.SNI != linkSNI {
-			t.Fatalf("往返后 SNI 变了：%q，想要 %q", got.SNI, linkSNI)
+		// SNI：往返后有效 SNI（ResolveSNI）必须不变。以前这里只比“写进链接
+		// 的 SNI”，因为 DefaultSNI 会被省略、解析回来是空串；2026-11-26
+		// 修了 BuildOpaqueLink——host 是域名且 SNI 显式为 DefaultSNI 时
+		// 不再省略（否则解析后 ResolveSNI 会回落到 host 域名，有效 SNI
+		// 就变了）。修好后直接比 ResolveSNI，两种情况都覆盖。
+		if ResolveSNI(got) != ResolveSNI(cfg) {
+			t.Fatalf("往返后有效 SNI 变了：%q，想要 %q（cfg SNI=%q，host=%q）", ResolveSNI(got), ResolveSNI(cfg), cfg.SNI, cfg.Host)
 		}
 		if !bytes.Equal(got.PIN, cfg.PIN) {
 			t.Fatalf("往返后 PIN 变了：%d 字节，想要 %d 字节", len(got.PIN), len(cfg.PIN))
