@@ -55,8 +55,25 @@ TRAFFIC_THROTTLE_RATE="125K"
 # off = 关，high = 空闲时平均约 20 秒一帧。
 COVER_TRAFFIC="low"
 
+# 预设的流量设置（和菜单第 9 项“载入预设”同一份值；只改流量相关字段和 RATE，
+# 不动端口/密钥/TLS/SNI；180G = 阿桑说的 200G 减 20G 余量；125K ≈ 1 Mbps）。
+set_preset_vars() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    gcp|1|谷歌|谷歌云)
+      TRAFFIC_MODE="total"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
+      TRAFFIC_LIMIT_MODE="block"; TRAFFIC_QUOTA="180G"; TRAFFIC_THROTTLE_RATE="125K"; RATE="0"
+      ;;
+    cdt|2|阿里云|阿里云cdt)
+      TRAFFIC_MODE="max"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
+      TRAFFIC_LIMIT_MODE="block"; TRAFFIC_QUOTA="180G"; TRAFFIC_THROTTLE_RATE="125K"; RATE="0"
+      ;;
+    *)
+      echo "预设不对：$1，应为 gcp（GCP）或 cdt（阿里云CDT）"; exit 1 ;;
+  esac
+}
+
 usage() {
-  echo "用法：sudo $0 [--port 端口] [--rate 限速] [--burst 突发] [--name 节点名] [--host 公网IP或域名] [--bin 服务端二进制路径] [--whitelist-ip 中转机IP] [--whitelist-file 白名单文件] [--fallback site|silent] [--tls-domain 域名 --tls-cert 证书 --tls-key 私钥]"
+  echo "用法：sudo $0 [--port 端口] [--rate 限速] [--burst 突发] [--name 节点名] [--host 公网IP或域名] [--bin 服务端二进制路径] [--whitelist-ip 中转机IP] [--whitelist-file 白名单文件] [--fallback site|silent] [--tls-domain 域名 --tls-cert 证书 --tls-key 私钥] [--preset gcp|cdt]"
   echo "  --port   监听端口，默认随机 10000-60000（不要用一眼能猜到的端口）"
   echo "           443 更像正常 HTTPS（配真 TLS 时最像），但 VPS 上 443 常被 nginx/Apache 等 Web 服务占着："
   echo "           被占时本脚本会直接报错停下，先停掉占用的服务（例如 systemctl stop nginx）或换个端口再装"
@@ -98,6 +115,9 @@ usage() {
   echo "  --traffic-throttle-rate TC 限速值，默认 125K（约 1 Mbps）：超限后全站降到的速度，例如 1M"
   echo "  --cover-traffic  掩护流量（v5 会话），默认 low：off（关）/ low（空闲时平均约 45 秒一帧小记录）/"
   echo "                   high（空闲时平均约 20 秒一帧）"
+  echo "  --preset   载入预设的流量设置（和菜单第 9 项一样）：gcp（GCP：180G / 总计 / 月 / 1日 / 阻断 / 不限速）"
+  echo "           或 cdt（阿里云CDT：180G / 最大值 / 月 / 1日 / 阻断 / 不限速）；只改流量设置，不动端口/密钥/TLS；"
+  echo "           后面再传 --traffic-* 可以单独再改其中一项"
   exit 1
 }
 
@@ -126,6 +146,7 @@ while [ $# -gt 0 ]; do
     --traffic-quota) TRAFFIC_QUOTA="$2"; shift 2 ;;
     --traffic-throttle-rate) TRAFFIC_THROTTLE_RATE="$2"; shift 2 ;;
     --cover-traffic) COVER_TRAFFIC="$2"; shift 2 ;;
+    --preset) set_preset_vars "$2"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "未知参数：$1"; usage ;;
   esac
@@ -366,13 +387,14 @@ cat > "$BIN_DIR/mmx" <<'MM_MENU_EOF'
 # mm-x 服务端管理菜单：在 VPS 上输入 mmx 呼出。
 # 功能：1 显示协议链接  2 查看服务状态  3 重启服务  4 更换密钥  5 修改限速
 #       6 查看最近日志  7 诱饵回退 / TLS 设置（真 TLS、自签 TLS、查指纹）  8 修改节点参数（含流量设置）
-#       9 卸载  10 退出
+#       9 载入预设（GCP / 阿里云CDT 的流量设置）  10 卸载  11 退出
 # 全部配置存在 /etc/mmx/config，密钥在 /etc/mmx/psk；
 # systemd 服务由本脚本按配置文件生成，改参数后自动重载 + 重启，
 # 重启失败自动回滚到改之前的配置，不会让服务起不来。
 # 隐藏用法（给部署脚本和脚本调用）：mmx --write-service（按配置写服务文件）、mmx --show-link [plain|opaque]（只打印链接，
 # 默认 opaque 不透明链接；plain 是短格式，只在显式指定时用）、
-# mmx --show-pin（只打印 TLS 证书的 SPKI 指纹）、mmx --show-traffic（打印本周期流量统计）。
+# mmx --show-pin（只打印 TLS 证书的 SPKI 指纹）、mmx --show-traffic（打印本周期流量统计）、
+# mmx --preset <gcp|cdt>（不进菜单直接载入预设，GCP 或阿里云CDT）。
 set -u
 
 ROOT="${MMX_TEST_ROOT:-}"
@@ -785,6 +807,57 @@ traffic_menu() {
   done
 }
 
+# 9) 载入预设：GCP / 阿里云CDT 的流量设置（和 vx 的载入预设同一份值；
+#    白名单/地区/SNI 是 VLESS 专属，mm-x 没有，不带过来）。
+#    GCP：180G / 总计 / 月 / 1日 / 阻断 / 不限速；阿里云CDT：180G / 最大值 / 月 / 1日 / 阻断 / 不限速。
+#    180G = 阿桑说的 200G 减 20G 余量；125K ≈ 1 Mbps（超限后 TC 限速值，阻断模式下用不上）。
+#    只改流量相关字段（TRAFFIC_* 和 RATE），不动端口/密钥/TLS/SNI。
+apply_preset() {
+  local name="$1"
+  case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in
+    gcp|1|谷歌|谷歌云)
+      TRAFFIC_MODE="total"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
+      TRAFFIC_LIMIT_MODE="block"; TRAFFIC_QUOTA="180G"; TRAFFIC_THROTTLE_RATE="125K"; RATE="0"
+      ;;
+    cdt|2|阿里云|阿里云cdt)
+      TRAFFIC_MODE="max"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
+      TRAFFIC_LIMIT_MODE="block"; TRAFFIC_QUOTA="180G"; TRAFFIC_THROTTLE_RATE="125K"; RATE="0"
+      ;;
+    *)
+      echo "没有这个预设：$name"
+      return 1
+      ;;
+  esac
+  apply_config "载入预设 $name（限额 $TRAFFIC_QUOTA，统计模式 $TRAFFIC_MODE，超限阻断）"
+}
+
+preset_menu() {
+  while true; do
+    load_config
+    echo ""
+    echo "--- 载入预设 ---"
+    echo "当前：限额 ${TRAFFIC_QUOTA:-0}　统计模式：$(traffic_mode_label)　周期：$(traffic_period_label)　限制模式：$(traffic_limit_label)"
+    echo "1) GCP：180G / 总计 / 月 / 1日 / 阻断 / 不限速"
+    echo "2) 阿里云CDT：180G / 最大值 / 月 / 1日 / 阻断 / 不限速"
+    echo "0) 返回"
+    local c
+    read -r -p "选一项： " c || return 0
+    case "$c" in
+      1|2)
+        local pname="GCP"; [ "$c" = "2" ] && pname="阿里云CDT"
+        echo "要载入 $pname：限额 180G，超限后阻断；只改流量设置，不动端口/密钥/TLS。"
+        local yn
+        read -r -p "确认载入吗？输入 y 确认： " yn || continue
+        case "$yn" in y|Y) ;; *) echo "已取消。"; pause; continue;; esac
+        if [ "$c" = "1" ]; then apply_preset gcp; else apply_preset cdt; fi
+        ;;
+      0|"") return 0 ;;
+      *) echo "没有这个选项" ;;
+    esac
+    pause
+  done
+}
+
 # 7) 诱饵回退 / TLS 设置：真 TLS（有域名）和自签 TLS（没域名）二选一；
 #    自签证书首次启动自动生成并存到 /etc/mmx/tls-cert.pem、tls-key.pem，
 #    客户端靠链接里的 pin（SPKI 指纹）锁定验证；换证书要重新生成链接（第 1 项）。
@@ -1016,11 +1089,12 @@ uninstall() {
 
 main() {
   if [ "$(id -u)" -ne 0 ]; then echo "请用 sudo 运行：sudo $MYNAME"; exit 1; fi
-  # 隐藏用法：部署脚本装完后按配置写服务文件；只打印链接；只打印 TLS 指纹；只打印流量统计
+  # 隐藏用法：部署脚本装完后按配置写服务文件；只打印链接；只打印 TLS 指纹；只打印流量统计；直接载入预设
   if [ "${1:-}" = "--write-service" ]; then load_config; write_service; exit 0; fi
   if [ "${1:-}" = "--show-link" ]; then show_link "${2:-opaque}"; exit 0; fi
   if [ "${1:-}" = "--show-pin" ]; then show_pin; exit 0; fi
   if [ "${1:-}" = "--show-traffic" ]; then show_traffic; exit 0; fi
+  if [ "${1:-}" = "--preset" ]; then load_config; apply_preset "${2:-}" || exit 1; exit 0; fi
   while true; do
     load_config
     echo ""
@@ -1041,8 +1115,9 @@ main() {
     echo "6) 查看最近日志"
     echo "7) 诱饵回退 / TLS 设置"
     echo "8) 修改节点参数"
-    echo "9) 卸载"
-    echo "10) 退出"
+    echo "9) 载入预设"
+    echo "10) 卸载"
+    echo "11) 退出"
     local c
     read -r -p "选一项： " c || exit 0
     case "$c" in
@@ -1054,8 +1129,9 @@ main() {
       6) show_logs ;;
       7) tls_menu ;;
       8) edit_params ;;
-      9) uninstall ;;
-      10|"") exit 0 ;;
+      9) preset_menu ;;
+      10) uninstall ;;
+      11|"") exit 0 ;;
       *) echo "没有这个选项" ;;
     esac
     pause
