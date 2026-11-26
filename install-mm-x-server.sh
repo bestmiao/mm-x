@@ -358,7 +358,7 @@ cat > "$BIN_DIR/mm" <<'MM_MENU_EOF'
 # systemd 服务由本脚本按配置文件生成，改参数后自动重载 + 重启，
 # 重启失败自动回滚到改之前的配置，不会让服务起不来。
 # 隐藏用法（给部署脚本和脚本调用）：mm --write-service（按配置写服务文件）、mm --show-link [plain|opaque]（只打印链接，
-# 默认 plain 短格式；opaque 是一串乱码，只有新版客户端能认——默认绝不能先切过去）、
+# 默认 opaque 不透明链接；plain 是短格式，只在显式指定时用）、
 # mm --show-pin（只打印 TLS 证书的 SPKI 指纹）、mm --show-traffic（打印本周期流量统计）。
 set -u
 
@@ -519,10 +519,10 @@ port_in_use() {
 
 # 1) 显示协议链接：从配置文件读密钥现拼（mmx-server --print-link）；
 #    密钥文件没有就先生成一个再拼。安装完不打印链接，就是为了让链接只在这里出现。
-#    用法：show_link [plain|opaque]，默认 plain（短格式）；opaque 是一串乱码，
-#    只有新版客户端能认——交互菜单里永远打 plain，要 opaque 用 mm --show-link opaque。
+#    用法：show_link [plain|opaque]，默认 opaque（不透明链接，一串乱码）；
+#    plain 是短格式，只在显式指定时用。
 show_link() {
-  local fmt="${1:-plain}"
+  local fmt="${1:-opaque}"
   case "$fmt" in
     plain|opaque) ;;
     *) echo "链接格式不对：$fmt，应为 plain（短格式）或 opaque（不透明链接）"; return 1 ;;
@@ -546,7 +546,7 @@ show_link() {
     link="$("$SERVER_BIN" --print-link --link-format "$fmt" --psk "$psk" --host "$host" --listen "0.0.0.0:$PORT" --rate "$RATE" --burst "$BURST" --name "$NAME" --tls-domain "$TLS_DOMAIN" --tls-cert "$TLS_CERT" --tls-key "$TLS_KEY" 2>/dev/null)"
   elif [ "${TLS_AUTO:-0}" = "1" ]; then
     # 自签模式：--print-link 会按路径加载证书（没有就现场生成），
-    # 链接是短格式（ver=5 + pin，obfs=tls 和默认 sni 不写进链接）。
+    # 链接默认是不透明格式（ver=5 + pin，obfs=tls 和默认 sni 不写进链接）。
     local sni_args=()
     if [ -n "${TLS_SNI:-}" ]; then sni_args=(--tls-sni "$TLS_SNI"); fi
     if [ -z "$host" ]; then host="<你的 VPS 公网 IP>"; fi
@@ -557,7 +557,7 @@ show_link() {
   fi
   if [ -z "$link" ]; then echo "拼链接失败（密钥或参数有问题），请看第 6 项日志。"; return 1; fi
   echo ""
-  echo "节点链接（粘贴到 MM 客户端就能用，绝不要分享给第二个人）："
+  echo "节点链接（粘贴到 mm-x 客户端就能用，绝不要分享给第二个人）："
   echo "$link"
   echo ""
 }
@@ -1005,7 +1005,7 @@ main() {
   if [ "$(id -u)" -ne 0 ]; then echo "请用 sudo 运行：sudo $MYNAME"; exit 1; fi
   # 隐藏用法：部署脚本装完后按配置写服务文件；只打印链接；只打印 TLS 指纹；只打印流量统计
   if [ "${1:-}" = "--write-service" ]; then load_config; write_service; exit 0; fi
-  if [ "${1:-}" = "--show-link" ]; then show_link "${2:-plain}"; exit 0; fi
+  if [ "${1:-}" = "--show-link" ]; then show_link "${2:-opaque}"; exit 0; fi
   if [ "${1:-}" = "--show-pin" ]; then show_pin; exit 0; fi
   if [ "${1:-}" = "--show-traffic" ]; then show_traffic; exit 0; fi
   while true; do
@@ -1083,4 +1083,4 @@ echo "密钥文件：$PSK_FILE（重装不换密钥；轮换密钥：mm 菜单�
 echo "配置文件：$CFG_FILE（菜单改参数就改这个文件）"
 echo "服务状态：mm 菜单第 2 项，或 systemctl status mmx-server；日志：mm 菜单第 6 项，或 journalctl -u mmx-server -f"
 echo ""
-echo "输入 mm 打开管理菜单，在菜单第 1 项查看协议链接（粘贴到 MM 客户端就能用，绝不要分享给第二个人）。"
+echo "输入 mm 打开管理菜单，在菜单第 1 项查看协议链接（粘贴到 mm-x 客户端就能用，绝不要分享给第二个人）。"

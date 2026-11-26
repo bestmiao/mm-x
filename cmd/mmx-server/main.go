@@ -49,7 +49,7 @@ func main() {
 	pskFile := flag.String("psk-file", "", "密钥文件路径：文件里写 64 位十六进制密钥；轮换密钥时直接改文件内容，服务端下次握手前自动发现并轮换（不用重启）")
 	graceStr := flag.String("grace", "24h", "密钥轮换后旧密钥的宽限期，例如 24h / 1h / 30m，0 = 换了就立即失效")
 	printLink := flag.Bool("print-link", false, "只打印当前密钥对应的 mmx:// 链接然后退出（轮换后生成新链接用）")
-	linkFormat := flag.String("link-format", "plain", "打印链接的格式：plain（mmx:// 短格式，默认）或 opaque（mmx:// 不透明链接，一串乱码，只有新版客户端能认）")
+	linkFormat := flag.String("link-format", "opaque", "打印链接的格式：opaque（mmx:// 不透明链接，一串乱码，默认）或 plain（mmx:// 短格式，只在显式指定时用）")
 	name := flag.String("name", "mm-x", "节点名（用于生成的 mmx:// 链接）")
 	advertiseHost := flag.String("host", "127.0.0.1", "mmx:// 链接里显示的服务器地址")
 	rateStr := flag.String("rate", "0", "服务端限速上限，例如 512K / 10M，0 = 不限速；最终生效值 = min(服务端 --rate，链接 rate)，服务端说了算")
@@ -310,9 +310,8 @@ func main() {
 		linkCfg.SNI = tlsSNIValue
 		linkCfg.PIN, _ = mmx.ParsePIN(tlsPIN)
 	}
-	// 链接格式：默认 plain（短格式）；opaque 是一串乱码，只有新版
-	// 客户端能认——默认绝不能先切过去，要等客户端版本发了、确认能认
-	// 之后再切。
+	// 链接格式：默认 opaque（不透明链接，一串乱码）；plain 是短格式，
+	// 只在显式指定 --link-format plain 时用。节点链接只有 mmx:// 一种。
 	if *linkFormat != "plain" && *linkFormat != "opaque" {
 		log.Fatalf("链接格式不合法：%q，应为 plain（短格式）或 opaque（不透明链接）", *linkFormat)
 	}
