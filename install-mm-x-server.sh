@@ -58,18 +58,24 @@ TRAFFIC_THROTTLE_RATE="125K"
 # 掩护流量（v5 会话）：默认 low（空闲时平均约 45 秒一帧小记录）；
 # off = 关，high = 空闲时平均约 20 秒一帧。
 COVER_TRAFFIC="low"
+# 目标域名白名单：默认关（""）；google = 只放行谷歌系域名
+# （GCP 预设用，保 GCP 每月 200 GiB 免费额度不被非谷歌流量吃掉）。
+DOMAIN_WHITELIST=""
 
-# 预设的流量设置（和菜单第 9 项“载入预设”同一份值；只改流量相关字段和 RATE，
-# 不动端口/密钥/TLS/SNI；180G = 阿桑说的 200G 减 20G 余量；125K ≈ 1 Mbps）。
+# 预设的流量设置（和菜单第 9 项“载入预设”同一份值；只改流量相关字段、RATE
+# 和域名白名单，不动端口/密钥/TLS/SNI；180G = 阿桑说的 200G 减 20G 余量；125K ≈ 1 Mbps）。
+# GCP 多开一个域名白名单（只放行谷歌系域名，保免费额度）；阿里云CDT 不开。
 set_preset_vars() {
   case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
     gcp|1|谷歌|谷歌云)
       TRAFFIC_MODE="total"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
       TRAFFIC_LIMIT_MODE="block"; TRAFFIC_QUOTA="180G"; TRAFFIC_THROTTLE_RATE="125K"; RATE="0"
+      DOMAIN_WHITELIST="google"
       ;;
     cdt|2|阿里云|阿里云cdt)
       TRAFFIC_MODE="max"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
       TRAFFIC_LIMIT_MODE="block"; TRAFFIC_QUOTA="180G"; TRAFFIC_THROTTLE_RATE="125K"; RATE="0"
+      DOMAIN_WHITELIST=""
       ;;
     *)
       echo "预设不对：$1，应为 gcp（GCP）或 cdt（阿里云CDT）"; exit 1 ;;
@@ -121,9 +127,11 @@ usage() {
   echo "  --traffic-throttle-rate TC 限速值，默认 125K（约 1 Mbps）：超限后全站降到的速度，例如 1M"
   echo "  --cover-traffic  掩护流量（v5 会话），默认 low：off（关）/ low（空闲时平均约 45 秒一帧小记录）/"
   echo "                   high（空闲时平均约 20 秒一帧）"
-  echo "  --preset   载入预设的流量设置（和菜单第 9 项一样）：gcp（GCP：180G / 总计 / 月 / 1日 / 阻断 / 不限速）"
-  echo "           或 cdt（阿里云CDT：180G / 最大值 / 月 / 1日 / 阻断 / 不限速）；只改流量设置，不动端口/密钥/TLS；"
-  echo "           后面再传 --traffic-* 可以单独再改其中一项"
+  echo "  --domain-whitelist 目标域名白名单，默认关：off（关）/ google（只放行谷歌系域名，其他目标直接拒绝；"
+  echo "                   IP 字面量目标只放行 Google 公共 DNS 8.8.8.8/8.8.4.4，其余拒绝）"
+  echo "  --preset   载入预设的流量设置（和菜单第 9 项一样）：gcp（GCP：180G / 总计 / 月 / 1日 / 阻断 / 不限速 / 白名单仅谷歌系）"
+  echo "           或 cdt（阿里云CDT：180G / 最大值 / 月 / 1日 / 阻断 / 不限速 / 无白名单）；只改流量设置和域名白名单，不动端口/密钥/TLS；"
+  echo "           后面再传 --traffic-* / --domain-whitelist 可以单独再改其中一项"
   exit 1
 }
 
@@ -152,6 +160,7 @@ while [ $# -gt 0 ]; do
     --traffic-quota) TRAFFIC_QUOTA="$2"; shift 2 ;;
     --traffic-throttle-rate) TRAFFIC_THROTTLE_RATE="$2"; shift 2 ;;
     --cover-traffic) COVER_TRAFFIC="$2"; shift 2 ;;
+    --domain-whitelist) DOMAIN_WHITELIST="$2"; shift 2 ;;
     --preset) set_preset_vars "$2"; shift 2 ;;
     --reinstall) REINSTALL="1"; shift ;;
     -h|--help) usage ;;
@@ -235,6 +244,12 @@ if [ "$TRAFFIC_START_DAY" -lt 1 ] || [ "$TRAFFIC_START_DAY" -gt 31 ]; then echo 
 printf '%s' "$TRAFFIC_QUOTA" | grep -Eq '^[0-9]+[KkMmGgTt]?$' || { echo "流量限额格式不对：$TRAFFIC_QUOTA（应为数字 + 可选 K/M/G/T，例如 500G、0）"; exit 1; }
 printf '%s' "$TRAFFIC_THROTTLE_RATE" | grep -Eq '^[0-9]+[KkMmGg]?$' || { echo "TC 限速值格式不对：$TRAFFIC_THROTTLE_RATE（应为数字 + 可选 K/M/G，例如 125K）"; exit 1; }
 if [ "$TRAFFIC_LIMIT_MODE" = "throttle" ] && [ "$TRAFFIC_THROTTLE_RATE" = "0" ]; then echo "TC 限速模式下限速值不能为 0（0 = 不限速，等于没限制）"; exit 1; fi
+# 域名白名单取值：off/空 = 关，google = 只放行谷歌系域名
+case "$(printf '%s' "$DOMAIN_WHITELIST" | tr '[:upper:]' '[:lower:]')" in
+  ""|off|none) DOMAIN_WHITELIST="" ;;
+  google) DOMAIN_WHITELIST="google" ;;
+  *) echo "域名白名单不合法：$DOMAIN_WHITELIST，应为 off（关，默认）或 google（只放行谷歌系域名）"; exit 1 ;;
+esac
 
 # 默认端口 443（没传 --port 时用 443；已安装时前面已从现有配置读出端口，不走这里）
 if [ -z "$PORT" ]; then
@@ -409,7 +424,7 @@ if [ "$UPDATE_ONLY" = "0" ]; then
 WHITELIST_IPS_STR="${WHITELIST_IPS[*]:-}"
 ALLOW_IPS_STR="${ALLOW_IPS[*]:-}"
 {
-  printf '%s=%q\n' PORT "$PORT" RATE "$RATE" BURST "$BURST" NAME "$NAME" HOST "$HOST" FALLBACK "$FALLBACK" TLS_DOMAIN "$TLS_DOMAIN" TLS_CERT "$TLS_CERT" TLS_KEY "$TLS_KEY" TLS_AUTO "$TLS_AUTO" TLS_SNI "$TLS_SNI" WHITELIST_IPS "$WHITELIST_IPS_STR" WHITELIST_FILE "$WHITELIST_FILE_INSTALLED" ALLOW_IPS "$ALLOW_IPS_STR" ALLOWLIST_FILE "$ALLOWLIST_FILE_INSTALLED" TRAFFIC_MODE "$TRAFFIC_MODE" TRAFFIC_PERIOD "$TRAFFIC_PERIOD" TRAFFIC_START_DAY "$TRAFFIC_START_DAY" TRAFFIC_LIMIT_MODE "$TRAFFIC_LIMIT_MODE" TRAFFIC_QUOTA "$TRAFFIC_QUOTA" TRAFFIC_THROTTLE_RATE "$TRAFFIC_THROTTLE_RATE" COVER_TRAFFIC "$COVER_TRAFFIC"
+  printf '%s=%q\n' PORT "$PORT" RATE "$RATE" BURST "$BURST" NAME "$NAME" HOST "$HOST" FALLBACK "$FALLBACK" TLS_DOMAIN "$TLS_DOMAIN" TLS_CERT "$TLS_CERT" TLS_KEY "$TLS_KEY" TLS_AUTO "$TLS_AUTO" TLS_SNI "$TLS_SNI" WHITELIST_IPS "$WHITELIST_IPS_STR" WHITELIST_FILE "$WHITELIST_FILE_INSTALLED" ALLOW_IPS "$ALLOW_IPS_STR" ALLOWLIST_FILE "$ALLOWLIST_FILE_INSTALLED" TRAFFIC_MODE "$TRAFFIC_MODE" TRAFFIC_PERIOD "$TRAFFIC_PERIOD" TRAFFIC_START_DAY "$TRAFFIC_START_DAY" TRAFFIC_LIMIT_MODE "$TRAFFIC_LIMIT_MODE" TRAFFIC_QUOTA "$TRAFFIC_QUOTA" TRAFFIC_THROTTLE_RATE "$TRAFFIC_THROTTLE_RATE" COVER_TRAFFIC "$COVER_TRAFFIC" DOMAIN_WHITELIST "$DOMAIN_WHITELIST"
 } > "$CFG_FILE"
 chmod 600 "$CFG_FILE"
 echo "配置文件已写入：$CFG_FILE"
@@ -425,7 +440,7 @@ cat > "$BIN_DIR/mmx" <<'MM_MENU_EOF'
 #!/bin/bash
 # mm-x 服务端管理菜单：在 VPS 上输入 mmx 呼出。
 # 功能：1 显示协议链接  2 查看服务状态  3 重启服务  4 更换密钥  5 修改限速
-#       6 查看最近日志  7 诱饵回退 / TLS 设置（真 TLS、自签 TLS、查指纹）  8 修改节点参数（含流量设置）
+#       6 查看最近日志  7 诱饵回退 / TLS 设置（真 TLS、自签 TLS、查指纹）  8 修改节点参数（含流量设置、域名白名单）
 #       9 载入预设（GCP / 阿里云CDT 的流量设置）  10 卸载  11 退出
 # 全部配置存在 /etc/mmx/config，密钥在 /etc/mmx/psk；
 # systemd 服务由本脚本按配置文件生成，改参数后自动重载 + 重启，
@@ -454,6 +469,7 @@ WHITELIST_IPS=""; WHITELIST_FILE=""; ALLOW_IPS=""; ALLOWLIST_FILE=""
 TRAFFIC_MODE="total"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
 TRAFFIC_LIMIT_MODE="block"; TRAFFIC_QUOTA="0"; TRAFFIC_THROTTLE_RATE="125K"
 COVER_TRAFFIC="low"
+DOMAIN_WHITELIST=""
 
 load_config() {
   if [ -f "$CFG_FILE" ]; then
@@ -465,7 +481,7 @@ load_config() {
 save_config() {
   mkdir -p "$CFG_DIR"
   {
-    printf '%s=%q\n' PORT "$PORT" RATE "$RATE" BURST "$BURST" NAME "$NAME" HOST "$HOST" FALLBACK "$FALLBACK" TLS_DOMAIN "$TLS_DOMAIN" TLS_CERT "$TLS_CERT" TLS_KEY "$TLS_KEY" TLS_AUTO "$TLS_AUTO" TLS_SNI "$TLS_SNI" WHITELIST_IPS "$WHITELIST_IPS" WHITELIST_FILE "$WHITELIST_FILE" ALLOW_IPS "$ALLOW_IPS" ALLOWLIST_FILE "$ALLOWLIST_FILE" TRAFFIC_MODE "$TRAFFIC_MODE" TRAFFIC_PERIOD "$TRAFFIC_PERIOD" TRAFFIC_START_DAY "$TRAFFIC_START_DAY" TRAFFIC_LIMIT_MODE "$TRAFFIC_LIMIT_MODE" TRAFFIC_QUOTA "$TRAFFIC_QUOTA" TRAFFIC_THROTTLE_RATE "$TRAFFIC_THROTTLE_RATE" COVER_TRAFFIC "$COVER_TRAFFIC"
+    printf '%s=%q\n' PORT "$PORT" RATE "$RATE" BURST "$BURST" NAME "$NAME" HOST "$HOST" FALLBACK "$FALLBACK" TLS_DOMAIN "$TLS_DOMAIN" TLS_CERT "$TLS_CERT" TLS_KEY "$TLS_KEY" TLS_AUTO "$TLS_AUTO" TLS_SNI "$TLS_SNI" WHITELIST_IPS "$WHITELIST_IPS" WHITELIST_FILE "$WHITELIST_FILE" ALLOW_IPS "$ALLOW_IPS" ALLOWLIST_FILE "$ALLOWLIST_FILE" TRAFFIC_MODE "$TRAFFIC_MODE" TRAFFIC_PERIOD "$TRAFFIC_PERIOD" TRAFFIC_START_DAY "$TRAFFIC_START_DAY" TRAFFIC_LIMIT_MODE "$TRAFFIC_LIMIT_MODE" TRAFFIC_QUOTA "$TRAFFIC_QUOTA" TRAFFIC_THROTTLE_RATE "$TRAFFIC_THROTTLE_RATE" COVER_TRAFFIC "$COVER_TRAFFIC" DOMAIN_WHITELIST "$DOMAIN_WHITELIST"
   } > "$CFG_FILE"
   chmod 600 "$CFG_FILE"
 }
@@ -490,6 +506,9 @@ write_service() {
   traffic_args=" --traffic-mode ${TRAFFIC_MODE:-total} --traffic-period ${TRAFFIC_PERIOD:-monthly} --traffic-start-day ${TRAFFIC_START_DAY:-1} --traffic-limit-mode ${TRAFFIC_LIMIT_MODE:-block} --traffic-quota ${TRAFFIC_QUOTA:-0} --traffic-throttle-rate ${TRAFFIC_THROTTLE_RATE:-125K} --traffic-file $CFG_DIR/traffic.json"
   # 掩护流量（v5 会话）：一直写进启动参数，默认 low。
   cover_args=" --cover-traffic ${COVER_TRAFFIC:-low}"
+  # 目标域名白名单：只在开了时写进启动参数（默认关，不写）。
+  local domain_whitelist_args=""
+  if [ -n "${DOMAIN_WHITELIST:-}" ]; then domain_whitelist_args=" --domain-whitelist $DOMAIN_WHITELIST"; fi
   mkdir -p "$UNIT_DIR"
   cat > "$UNIT_FILE" <<UNIT_EOF
 [Unit]
@@ -502,7 +521,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=$SERVER_BIN --psk-file $PSK_FILE --listen 0.0.0.0:$PORT --rate $RATE --burst $BURST --name "$NAME" --fallback $FALLBACK$tls_args$wl_args$al_args$traffic_args$cover_args
+ExecStart=$SERVER_BIN --psk-file $PSK_FILE --listen 0.0.0.0:$PORT --rate $RATE --burst $BURST --name "$NAME" --fallback $FALLBACK$tls_args$wl_args$al_args$traffic_args$cover_args$domain_whitelist_args
 Restart=always
 RestartSec=5
 # 密钥文件只让 root 读，服务以 root 跑（只监听一个端口，不写别的目录）
@@ -846,28 +865,33 @@ traffic_menu() {
   done
 }
 
-# 9) 载入预设：GCP / 阿里云CDT 的流量设置（和 vx 的载入预设同一份值；
-#    白名单/地区/SNI 是 VLESS 专属，mm-x 没有，不带过来）。
-#    GCP：180G / 总计 / 月 / 1日 / 阻断 / 不限速；阿里云CDT：180G / 最大值 / 月 / 1日 / 阻断 / 不限速。
+# 9) 载入预设：GCP / 阿里云CDT 的流量设置（和 vx 的载入预设同一份值）。
+#    GCP：180G / 总计 / 月 / 1日 / 阻断 / 不限速 / 白名单仅谷歌系；
+#    阿里云CDT：180G / 最大值 / 月 / 1日 / 阻断 / 不限速 / 无白名单。
 #    180G = 阿桑说的 200G 减 20G 余量；125K ≈ 1 Mbps（超限后 TC 限速值，阻断模式下用不上）。
-#    只改流量相关字段（TRAFFIC_* 和 RATE），不动端口/密钥/TLS/SNI。
+#    只改流量相关字段（TRAFFIC_* 和 RATE）和域名白名单，不动端口/密钥/TLS/SNI。
+#    （vx 的地区/SNI 是 VLESS 专属，mm-x 没有，不带过来；白名单是服务端
+#    按域名过滤，和 vx 的 geosite:google 路由效果一样。）
 apply_preset() {
   local name="$1"
   case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in
     gcp|1|谷歌|谷歌云)
       TRAFFIC_MODE="total"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
       TRAFFIC_LIMIT_MODE="block"; TRAFFIC_QUOTA="180G"; TRAFFIC_THROTTLE_RATE="125K"; RATE="0"
+      DOMAIN_WHITELIST="google"
       ;;
     cdt|2|阿里云|阿里云cdt)
       TRAFFIC_MODE="max"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
       TRAFFIC_LIMIT_MODE="block"; TRAFFIC_QUOTA="180G"; TRAFFIC_THROTTLE_RATE="125K"; RATE="0"
+      DOMAIN_WHITELIST=""
       ;;
     *)
       echo "没有这个预设：$name"
       return 1
       ;;
   esac
-  apply_config "载入预设 $name（限额 $TRAFFIC_QUOTA，统计模式 $TRAFFIC_MODE，超限阻断）"
+  local wl_desc="无白名单"; [ -n "$DOMAIN_WHITELIST" ] && wl_desc="白名单仅谷歌系域名"
+  apply_config "载入预设 $name（限额 $TRAFFIC_QUOTA，统计模式 $TRAFFIC_MODE，超限阻断，$wl_desc）"
 }
 
 preset_menu() {
@@ -875,16 +899,20 @@ preset_menu() {
     load_config
     echo ""
     echo "--- 载入预设 ---"
-    echo "当前：限额 ${TRAFFIC_QUOTA:-0}　统计模式：$(traffic_mode_label)　周期：$(traffic_period_label)　限制模式：$(traffic_limit_label)"
-    echo "1) GCP：180G / 总计 / 月 / 1日 / 阻断 / 不限速"
-    echo "2) 阿里云CDT：180G / 最大值 / 月 / 1日 / 阻断 / 不限速"
+    echo "当前：限额 ${TRAFFIC_QUOTA:-0}　统计模式：$(traffic_mode_label)　周期：$(traffic_period_label)　限制模式：$(traffic_limit_label)　域名白名单：$([ -n "${DOMAIN_WHITELIST:-}" ] && echo "仅谷歌系域名" || echo "关闭")"
+    echo "1) GCP：180G / 总计 / 月 / 1日 / 阻断 / 不限速 / 白名单仅谷歌系"
+    echo "2) 阿里云CDT：180G / 最大值 / 月 / 1日 / 阻断 / 不限速 / 无白名单"
     echo "0) 返回"
     local c
     read -r -p "选一项： " c || return 0
     case "$c" in
       1|2)
         local pname="GCP"; [ "$c" = "2" ] && pname="阿里云CDT"
-        echo "要载入 $pname：限额 180G，超限后阻断；只改流量设置，不动端口/密钥/TLS。"
+        if [ "$c" = "1" ]; then
+          echo "要载入 $pname：限额 180G，超限后阻断，并打开域名白名单（只放行谷歌系域名）；只改流量设置和白名单，不动端口/密钥/TLS。"
+        else
+          echo "要载入 $pname：限额 180G，超限后阻断，域名白名单关闭；只改流量设置和白名单，不动端口/密钥/TLS。"
+        fi
         local yn
         read -r -p "确认载入吗？输入 y 确认： " yn || continue
         case "$yn" in y|Y) ;; *) echo "已取消。"; pause; continue;; esac
@@ -978,7 +1006,8 @@ tls_menu() {
 
 # 8) 修改节点参数：先显示当前启动命令，再按项改；改完校验，写回配置，
 #    重载 + 重启，重启失败自动回滚。第 11 项是流量设置（统计模式/周期/
-#    起始日/限制模式/限额/TC 限速值 + 查看流量），第 12 项是掩护流量档位。
+#    起始日/限制模式/限额/TC 限速值 + 查看流量），第 12 项是掩护流量档位，
+#    第 13 项是域名白名单（off 关 / google 只放行谷歌系域名）。
 edit_params() {
   while true; do
     load_config
@@ -998,6 +1027,7 @@ edit_params() {
     echo "10) 诱饵回退 / TLS 设置"
     echo "11) 流量设置（统计模式 / 周期 / 限额 / 查看流量）"
     echo "12) 掩护流量（当前 ${COVER_TRAFFIC:-low}：off 关 / low 空闲约 45 秒一帧 / high 空闲约 20 秒一帧）"
+    echo "13) 域名白名单（当前 $([ -n "${DOMAIN_WHITELIST:-}" ] && echo "仅谷歌系域名" || echo "关闭")：只放行谷歌系域名时，非谷歌目标直接拒绝）"
     echo "0) 返回"
     local c
     read -r -p "改哪一项： " c || return 0
@@ -1099,6 +1129,20 @@ edit_params() {
           *) echo "档位不对：$cv，应为 off / low / high"; pause; continue;;
         esac
         apply_config "掩护流量改为 $COVER_TRAFFIC"
+        ;;
+      13)
+        local dw
+        read -r -p "域名白名单（off 关 / google 只放行谷歌系域名，留空不变）： " dw || continue
+        [ -z "$dw" ] && { echo "没改。"; pause; continue; }
+        case "$(printf '%s' "$dw" | tr '[:upper:]' '[:lower:]')" in
+          ""|off|none|关) DOMAIN_WHITELIST="" ;;
+          google|谷歌|谷歌系) DOMAIN_WHITELIST="google" ;;
+          *) echo "白名单不对：$dw，应为 off（关）或 google（只放行谷歌系域名）"; pause; continue;;
+        esac
+        if [ -n "$DOMAIN_WHITELIST" ]; then
+          echo "注意：白名单一开，非谷歌域名（GitHub、AI、视频站等）和 IP 字面量目标都会被拒绝，只剩谷歌系能走这台服务器。"
+        fi
+        apply_config "域名白名单改为 $([ -n "$DOMAIN_WHITELIST" ] && echo "仅谷歌系域名" || echo "关闭")"
         ;;
       0|"") return 0 ;;
       *) echo "没有这个选项" ;;
