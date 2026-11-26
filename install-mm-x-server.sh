@@ -7,13 +7,16 @@
 #   sudo ./install-mm-x-server.sh [--port 端口] [--rate 限速] [--burst 突发] [--name 节点名] [--host 公网IP或域名]
 #      [--fallback site|silent] [--tls-domain 域名 --tls-cert 证书 --tls-key 私钥]
 #      [--tls-auto [--tls-sni 域名]]（没域名时用自签 TLS + SPKI 锁定，和真 TLS 二选一）
-# 默认：随机高位端口（10000-60000）、不限速（rate=0；想限速再传 --rate，例如 6250K = 50 Mbps）、突发 0（严格模式：限速时任何时候都不超过限速；旧默认 15M 会让每条新连接开头先冲 15MB 再限速，实测 30MB 文件平均跑到 96 Mbps、峰值 1300 Mbps，等于没限——YouTube 这种多连接、分段取数据的流量，每段都落在突发里，更是全程不限）。
+# 默认：端口 443（没传 --port 时用 443；443 被 nginx/Apache 等占了会报错停下，
+# 先停掉占用的服务或传 --port 换端口）、不限速（rate=0；想限速再传 --rate，例如 6250K = 50 Mbps）、突发 0（严格模式：限速时任何时候都不超过限速；旧默认 15M 会让每条新连接开头先冲 15MB 再限速，实测 30MB 文件平均跑到 96 Mbps、峰值 1300 Mbps，等于没限——YouTube 这种多连接、分段取数据的流量，每段都落在突发里，更是全程不限）。
 # 脚本会：装二进制到 /usr/local/bin/mmx-server；生成/保留 /etc/mmx/psk（重装不换密钥，
 #   旧密钥靠服务端的 24 小时宽限期继续用）；默认开 BBR（开不了只警告）；放行防火墙端口；
 #   写 /etc/mmx/config（全部参数都在这里，菜单改参数就改这个文件）；写 systemd 服务
 #   （开机自启、崩溃自动重启）；装管理菜单 /usr/local/bin/mmx（输入 mmx 呼出）。
 # 安装完不打印 mmx:// 链接——链接在 mm 菜单第 1 项里看。
-# 重装/更新：直接再跑一次本脚本即可，密钥文件不动，服务会自动重启加载新二进制。
+# 再跑一次本脚本：默认只更新程序文件（服务端二进制、管理菜单、服务文件），
+# 节点配置（端口/密钥/TLS/流量设置）原样保留，不会重置；彻底重装节点（换端口/
+# 重置配置）必须显式加 --reinstall（交互终端里还会再确认一次，默认不重装）。
 set -euo pipefail
 
 # 测试钩子：MMX_TEST_ROOT 设置时，所有路径都改到该目录下（不碰真实系统），
@@ -27,6 +30,7 @@ UNIT_DIR="$ROOT/etc/systemd/system"
 UNIT_FILE="$UNIT_DIR/mmx-server.service"
 
 PORT=""
+REINSTALL="0" # --reinstall 传过就置 1（彻底重装节点）；不传时已安装就只更新程序文件
 RATE="0"
 BURST="0"
 NAME="mm-x"
@@ -73,10 +77,12 @@ set_preset_vars() {
 }
 
 usage() {
-  echo "用法：sudo $0 [--port 端口] [--rate 限速] [--burst 突发] [--name 节点名] [--host 公网IP或域名] [--bin 服务端二进制路径] [--whitelist-ip 中转机IP] [--whitelist-file 白名单文件] [--fallback site|silent] [--tls-domain 域名 --tls-cert 证书 --tls-key 私钥] [--preset gcp|cdt]"
-  echo "  --port   监听端口，默认随机 10000-60000（不要用一眼能猜到的端口）"
-  echo "           443 更像正常 HTTPS（配真 TLS 时最像），但 VPS 上 443 常被 nginx/Apache 等 Web 服务占着："
-  echo "           被占时本脚本会直接报错停下，先停掉占用的服务（例如 systemctl stop nginx）或换个端口再装"
+  echo "用法：sudo $0 [--port 端口] [--rate 限速] [--burst 突发] [--name 节点名] [--host 公网IP或域名] [--bin 服务端二进制路径] [--whitelist-ip 中转机IP] [--whitelist-file 白名单文件] [--fallback site|silent] [--tls-domain 域名 --tls-cert 证书 --tls-key 私钥] [--preset gcp|cdt] [--reinstall]"
+  echo "  --port   监听端口，默认 443（更像正常 HTTPS；不要用一眼能猜到的端口）"
+  echo "           443 被占时本脚本会直接报错停下，先停掉占用的服务（例如 systemctl stop nginx）或换个端口再装"
+  echo "  --reinstall 彻底重装节点：按本次传入参数重写 /etc/mmx/config（端口/限速/TLS/流量设置都会重置；"
+  echo "           密钥文件保留不变）。不加时：已安装就只更新程序文件（服务端二进制、管理菜单、服务文件），"
+  echo "           节点配置原样保留，再跑一遍也不会把服务重置掉"
   echo "  --rate   服务端限速上限，默认 0（不限速；想限速再填，例如 6250K = 50 Mbps，约 6.25 MB/s）"
   echo "  --burst  服务端突发额度上限，默认 0（严格模式：任何时候都不超过限速；想允许开头冲一把再填，例如 --burst 5M）"
   echo "  --name   节点名，默认 mm-x；不传时安装会问一句（留空用默认 mm-x），"
@@ -147,6 +153,7 @@ while [ $# -gt 0 ]; do
     --traffic-throttle-rate) TRAFFIC_THROTTLE_RATE="$2"; shift 2 ;;
     --cover-traffic) COVER_TRAFFIC="$2"; shift 2 ;;
     --preset) set_preset_vars "$2"; shift 2 ;;
+    --reinstall) REINSTALL="1"; shift ;;
     -h|--help) usage ;;
     *) echo "未知参数：$1"; usage ;;
   esac
@@ -155,6 +162,26 @@ done
 if [ "$(id -u)" -ne 0 ]; then
   echo "请用 sudo 运行：sudo $0"
   exit 1
+fi
+
+# 已安装检测：/etc/mmx/config 已存在且没加 --reinstall 时，再跑本脚本只更新程序文件，
+# 不装节点、不改配置。读出现有配置：后面流程里的端口/限速/TLS 等全部沿用现有的值，
+# 命令行给的安装参数（--port/--rate/--preset/--traffic-* 等）一律忽略。
+UPDATE_ONLY="0"
+if [ -f "$CFG_FILE" ] && [ "$REINSTALL" != "1" ]; then
+  UPDATE_ONLY="1"
+  . "$CFG_FILE"
+  echo "检测到已安装的 mm-x 节点（端口 ${PORT:-未知}），本次只更新程序文件（服务端二进制、管理菜单、服务文件），不改节点配置。"
+  echo "安装参数（--port/--rate/--preset/--traffic-* 等）已忽略；改节点参数请用 mmx 菜单；要彻底重装节点请加 --reinstall。"
+fi
+# --reinstall 是显式重装：交互终端里再确认一次（默认不重装）；管道/自动化里直接执行。
+if [ "$REINSTALL" = "1" ] && [ -f "$CFG_FILE" ] && [ -t 0 ]; then
+  echo "警告：--reinstall 会重装节点：按本次传入参数重写 $CFG_FILE（端口/限速/TLS/流量设置都会按本次参数重置；密钥文件保留不变）。"
+  read -r -p "确认重装吗？输入 y 确认（直接回车 = 取消）： " _yn || true
+  if [ "${_yn:-}" != "y" ] && [ "${_yn:-}" != "Y" ]; then
+    echo "已取消重装，现有节点未动。"
+    exit 0
+  fi
 fi
 
 # 回退模式与真 TLS 参数校验
@@ -209,9 +236,9 @@ printf '%s' "$TRAFFIC_QUOTA" | grep -Eq '^[0-9]+[KkMmGgTt]?$' || { echo "流量�
 printf '%s' "$TRAFFIC_THROTTLE_RATE" | grep -Eq '^[0-9]+[KkMmGg]?$' || { echo "TC 限速值格式不对：$TRAFFIC_THROTTLE_RATE（应为数字 + 可选 K/M/G，例如 125K）"; exit 1; }
 if [ "$TRAFFIC_LIMIT_MODE" = "throttle" ] && [ "$TRAFFIC_THROTTLE_RATE" = "0" ]; then echo "TC 限速模式下限速值不能为 0（0 = 不限速，等于没限制）"; exit 1; fi
 
-# 随机高位端口：10000-60000
+# 默认端口 443（没传 --port 时用 443；已安装时前面已从现有配置读出端口，不走这里）
 if [ -z "$PORT" ]; then
-  PORT=$((10000 + RANDOM % 50000))
+  PORT=443
 fi
 case "$PORT" in ''|*[!0-9]*|0) echo "端口不合法：$PORT，应为 1-65535 之间的数字"; exit 1;; esac
 if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then echo "端口不合法：$PORT，应为 1-65535 之间的数字"; exit 1; fi
@@ -258,10 +285,11 @@ if [ -z "$BIN" ]; then
 fi
 if [ ! -f "$BIN" ]; then echo "服务端二进制不存在：$BIN"; exit 1; fi
 
-# 节点名：没传 --name 时，写配置之前交互问一句，留空用默认 mm-x；
+# 节点名：全新安装/重装时，没传 --name 就交互问一句，留空用默认 mm-x；
 # 只在 stdin 是终端时才问——一键命令是管道（curl | bash）、
 # 自动化脚本的 stdin 也不是终端，这时直接用默认，不许卡住等输入。
-if [ "$NAME_SET" = "0" ] && [ -t 0 ]; then
+# 已安装更新模式不问（节点名沿用现有配置）。
+if [ "$UPDATE_ONLY" = "0" ] && [ "$NAME_SET" = "0" ] && [ -t 0 ]; then
   read -r -p "节点名（留空用默认 mm-x）： " NAME_INPUT || true
   if [ -n "$NAME_INPUT" ]; then NAME="$NAME_INPUT"; fi
 fi
@@ -279,6 +307,12 @@ fi
 
 # 1) 装二进制（更新模式下 BIN 就是已安装的文件，跳过自复制）
 mkdir -p "$BIN_DIR"
+# 已安装更新模式：先备份旧二进制——新二进制重启失败时可以还原，服务不会停在起不来的状态
+BIN_BAK=""
+if [ "$UPDATE_ONLY" = "1" ] && [ -x "$BIN_DIR/mmx-server" ]; then
+  BIN_BAK="$BIN_DIR/mmx-server.bak"
+  cp -f "$BIN_DIR/mmx-server" "$BIN_BAK"
+fi
 if [ "$BIN" != "$BIN_DIR/mmx-server" ]; then
   install -m 755 "$BIN" "$BIN_DIR/mmx-server"
   echo "二进制已安装：$BIN_DIR/mmx-server"
@@ -370,6 +404,8 @@ fi
 
 # 7) 写配置文件 /etc/mmx/config：全部参数都在这里，菜单改参数就改这个文件，
 #    再由菜单按它重新生成 systemd 服务（改错了重启失败会自动回滚）。
+#    只在全新安装或 --reinstall 时写；已安装更新模式跳过，节点配置原样保留。
+if [ "$UPDATE_ONLY" = "0" ]; then
 WHITELIST_IPS_STR="${WHITELIST_IPS[*]:-}"
 ALLOW_IPS_STR="${ALLOW_IPS[*]:-}"
 {
@@ -377,6 +413,9 @@ ALLOW_IPS_STR="${ALLOW_IPS[*]:-}"
 } > "$CFG_FILE"
 chmod 600 "$CFG_FILE"
 echo "配置文件已写入：$CFG_FILE"
+else
+echo "已安装节点：跳过写配置（$CFG_FILE 原样保留）"
+fi
 
 # 8) 写管理菜单 /usr/local/bin/mmx：输入 mmx 呼出。
 #    菜单是一个独立的 bash 脚本；配置存在 /etc/mmx/config，密钥在 /etc/mmx/psk，
@@ -1155,11 +1194,35 @@ systemctl restart mmx-server
 sleep 2
 if systemctl is-active --quiet mmx-server; then
   echo "服务已启动：mmx-server 正在运行"
+  # 更新成功，备份的旧二进制可以删了
+  [ -n "$BIN_BAK" ] && rm -f "$BIN_BAK"
 else
+  # 更新模式且有旧二进制备份：新二进制起不来就还原旧的再起一次，不让服务停着
+  if [ -n "$BIN_BAK" ] && [ -f "$BIN_BAK" ]; then
+    echo "新二进制启动失败，正在还原旧二进制……"
+    cp -f "$BIN_BAK" "$BIN_DIR/mmx-server"
+    rm -f "$BIN_BAK"
+    systemctl daemon-reload
+    systemctl restart mmx-server
+    sleep 2
+    if systemctl is-active --quiet mmx-server; then
+      echo "已还原旧二进制，服务用原配置恢复运行（本次更新没生效，请检查新二进制再更新）。"
+      exit 0
+    fi
+  fi
   echo "服务启动失败，请看日志：journalctl -u mmx-server -n 50"
   exit 1
 fi
 
+if [ "$UPDATE_ONLY" = "1" ]; then
+echo ""
+echo "== 更新完成 =="
+echo "程序文件已更新（服务端二进制、管理菜单、服务文件）；节点配置原样保留。"
+echo "端口：$PORT（不变）；限速：$RATE；TLS：$TLS_MODE_DESC；节点名：$NAME"
+echo "密钥文件：$PSK_FILE（未变）；配置文件：$CFG_FILE（未动）"
+echo "想改节点参数用 mmx 菜单；想彻底重装节点请加 --reinstall。"
+echo "服务状态：mm 菜单第 2 项，或 systemctl status mmx-server；日志：mm 菜单第 6 项，或 journalctl -u mmx-server -f"
+else
 echo ""
 echo "== 安装完成 =="
 echo "监听端口：$PORT"
@@ -1175,3 +1238,4 @@ echo "配置文件：$CFG_FILE（菜单改参数就改这个文件）"
 echo "服务状态：mm 菜单第 2 项，或 systemctl status mmx-server；日志：mm 菜单第 6 项，或 journalctl -u mmx-server -f"
 echo ""
 echo "输入 mmx 打开管理菜单，在菜单第 1 项查看协议链接（粘贴到 mm-x 客户端就能用，绝不要分享给第二个人）。"
+fi
