@@ -10,10 +10,14 @@
 #      --domain 是一键：装完自动申请 Let's Encrypt 证书并切真 TLS，DNS 须先指到本机、80 端口空闲）
 # 默认：端口 443（没传 --port 时用 443；443 被 nginx/Apache 等占了会报错停下，
 # 先停掉占用的服务或传 --port 换端口）、不限速（rate=0；想限速再传 --rate，例如 6250K = 50 Mbps）、突发 0（严格模式：限速时任何时候都不超过限速；旧默认 15M 会让每条新连接开头先冲 15MB 再限速，实测 30MB 文件平均跑到 96 Mbps、峰值 1300 Mbps，等于没限——YouTube 这种多连接、分段取数据的流量，每段都落在突发里，更是全程不限）。
-# 脚本会：装二进制到 /usr/local/bin/mmx-server；生成/保留 /etc/mmx/psk（重装不换密钥，
+# 全新安装只装程序：二进制到 /usr/local/bin/mmx-server + 管理菜单 /usr/local/bin/mmx（输入 mmx 呼出），
+# 不建节点、不生成密钥、不写 /etc/mmx/config、不写服务文件、不启动服务；装完有终端就进入主菜单，
+# 用菜单第 1 项添加节点（问端口、节点名、流量限额、域名还是 IP，建好后服务自动启动）。
+# 非交互（管道/自动化）时不进菜单，只打印"输入 mmx 打开菜单添加节点"后退出。
+# --reinstall 重装节点时才做全套：生成/保留 /etc/mmx/psk（重装不换密钥，
 #   旧密钥靠服务端的 24 小时宽限期继续用）；默认开 BBR（开不了只警告）；放行防火墙端口；
 #   写 /etc/mmx/config（全部参数都在这里，菜单改参数就改这个文件）；写服务文件
-#   （systemd 用单元文件，OpenRC/Alpine 用 /etc/init.d/mmx-server；开机自启、崩溃自动重启）；装管理菜单 /usr/local/bin/mmx（输入 mmx 呼出）。
+#   （systemd 用单元文件，OpenRC/Alpine 用 /etc/init.d/mmx-server；开机自启、崩溃自动重启）。
 # 安装完不打印 mmx:// 链接——链接在 mm 菜单第 5 项里看。
 # 再跑一次本脚本：默认只更新程序文件（服务端二进制、管理菜单、服务文件），
 # 节点配置（端口/密钥/TLS/流量设置）原样保留，不会重置；彻底重装节点（换端口/
@@ -165,7 +169,8 @@ usage() {
   echo "           443 被占时本脚本会直接报错停下，先停掉占用的服务（例如 $(svc_stop_cmd nginx)）或换个端口再装"
   echo "  --reinstall 彻底重装节点：按本次传入参数重写 /etc/mmx/config（端口/限速/TLS/流量设置都会重置；"
   echo "           密钥文件保留不变）。不加时：已安装就只更新程序文件（服务端二进制、管理菜单、服务文件），"
-  echo "           节点配置原样保留，再跑一遍也不会把服务重置掉"
+  echo "           节点配置原样保留，再跑一遍也不会把服务重置掉；全新安装（没节点）时不建节点，只装程序，"
+  echo "           节点在菜单第 1 项添加——只有加了 --reinstall 才会按传入参数建节点"
   echo "  --rate   服务端限速上限，默认 0（不限速；想限速再填，例如 6250K = 50 Mbps，约 6.25 MB/s）"
   echo "  --burst  服务端突发额度上限，默认 0（严格模式：任何时候都不超过限速；想允许开头冲一把再填，例如 --burst 5M）"
   echo "  --name   节点名，默认 mm-x；不传时安装会问一句（留空用默认 mm-x），"
@@ -193,8 +198,9 @@ usage() {
   echo "                   和 --tls-domain 二选一；以后有了域名再用菜单第 3 项（编辑节点）→ 第 10 子项换成真 TLS"
   echo "  --tls-sni        自签 TLS 的默认 SNI（一个常见域名，例如 www.microsoft.com，默认就是它）；"
   echo "                   链接里写了 sni 参数就以链接为准"
-  echo "  --domain   一键设置域名：装完自动申请 Let's Encrypt 证书并切到真 TLS（只在全新安装/"
-  echo "           --reinstall 时跑；再跑脚本只更新程序文件时忽略，改域名请用 mmx 菜单第 3 项（编辑节点）→ 第 10 子项）。"
+  echo "  --domain   一键设置域名：装完自动申请 Let's Encrypt 证书并切到真 TLS（只在 --reinstall 重装节点时跑；"
+  echo "           全新安装不建节点，所以 --domain 会被忽略，域名在菜单第 1 项添加节点时选；再跑脚本只更新程序文件时忽略，"
+  echo "           改域名请用 mmx 菜单第 3 项（编辑节点）→ 第 10 子项）。"
   echo "           域名 DNS 必须先指到这台 VPS，80 端口要空着（certbot standalone 校验用）；"
   echo "           续期用 --reuse-key（密钥不变，pin 不变，链接不失效），续期后自动重启服务。"
   echo "           申请失败时服务仍用自签 TLS 继续跑，不会留半切的配置；和 --tls-domain 不能同时用"
@@ -217,34 +223,44 @@ usage() {
   exit 1
 }
 
+# 全新安装判定（无配置、不是 --reinstall）：不建节点，只装二进制 + 菜单；节点在菜单第 1 项添加。
+# 必须在参数解析前算出来：--preset 的校验在解析时跑，全新安装时要跳过它，所以得提前知道；
+# --reinstall 本身是参数之一，先预扫描一遍（解析循环里还会再置一次，无害）。
+FRESH_NO_NODE="0"
+NODE_FLAGS_GIVEN=""
+for _a in "$@"; do
+  if [ "$_a" = "--reinstall" ]; then REINSTALL="1"; fi
+done
+if [ ! -f "$CFG_FILE" ] && [ "$REINSTALL" != "1" ]; then FRESH_NO_NODE="1"; fi
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --port) PORT="$2"; shift 2 ;;
-    --rate) RATE="$2"; shift 2 ;;
-    --burst) BURST="$2"; shift 2 ;;
-    --name) NAME="$2"; NAME_SET="1"; shift 2 ;;
-    --host) HOST="$2"; shift 2 ;;
+    --port) NODE_FLAGS_GIVEN=1; PORT="$2"; shift 2 ;;
+    --rate) NODE_FLAGS_GIVEN=1; RATE="$2"; shift 2 ;;
+    --burst) NODE_FLAGS_GIVEN=1; BURST="$2"; shift 2 ;;
+    --name) NODE_FLAGS_GIVEN=1; NAME="$2"; NAME_SET="1"; shift 2 ;;
+    --host) NODE_FLAGS_GIVEN=1; HOST="$2"; shift 2 ;;
     --bin) BIN="$2"; shift 2 ;;
-    --whitelist-ip) WHITELIST_IPS+=("$2"); shift 2 ;;
-    --whitelist-file) WHITELIST_FILE="$2"; shift 2 ;;
-    --allow-ip) ALLOW_IPS+=("$2"); shift 2 ;;
-    --allowlist-file) ALLOWLIST_FILE="$2"; shift 2 ;;
-    --fallback) FALLBACK="$2"; shift 2 ;;
-    --tls-domain) TLS_DOMAIN="$2"; shift 2 ;;
-    --tls-cert) TLS_CERT="$2"; shift 2 ;;
-    --tls-key) TLS_KEY="$2"; shift 2 ;;
-    --tls-auto) TLS_AUTO="1"; shift ;;
-    --tls-sni) TLS_SNI="$2"; shift 2 ;;
-    --domain) DOMAIN_SETUP="$2"; shift 2 ;;
-    --traffic-mode) TRAFFIC_MODE="$2"; shift 2 ;;
-    --traffic-period) TRAFFIC_PERIOD="$2"; shift 2 ;;
-    --traffic-start-day) TRAFFIC_START_DAY="$2"; shift 2 ;;
-    --traffic-limit-mode) TRAFFIC_LIMIT_MODE="$2"; shift 2 ;;
-    --traffic-quota) TRAFFIC_QUOTA="$2"; shift 2 ;;
-    --traffic-throttle-rate) TRAFFIC_THROTTLE_RATE="$2"; shift 2 ;;
-    --cover-traffic) COVER_TRAFFIC="$2"; shift 2 ;;
-    --domain-whitelist) DOMAIN_WHITELIST="$2"; shift 2 ;;
-    --preset) set_preset_vars "$2"; shift 2 ;;
+    --whitelist-ip) NODE_FLAGS_GIVEN=1; WHITELIST_IPS+=("$2"); shift 2 ;;
+    --whitelist-file) NODE_FLAGS_GIVEN=1; WHITELIST_FILE="$2"; shift 2 ;;
+    --allow-ip) NODE_FLAGS_GIVEN=1; ALLOW_IPS+=("$2"); shift 2 ;;
+    --allowlist-file) NODE_FLAGS_GIVEN=1; ALLOWLIST_FILE="$2"; shift 2 ;;
+    --fallback) NODE_FLAGS_GIVEN=1; FALLBACK="$2"; shift 2 ;;
+    --tls-domain) NODE_FLAGS_GIVEN=1; TLS_DOMAIN="$2"; shift 2 ;;
+    --tls-cert) NODE_FLAGS_GIVEN=1; TLS_CERT="$2"; shift 2 ;;
+    --tls-key) NODE_FLAGS_GIVEN=1; TLS_KEY="$2"; shift 2 ;;
+    --tls-auto) NODE_FLAGS_GIVEN=1; TLS_AUTO="1"; shift ;;
+    --tls-sni) NODE_FLAGS_GIVEN=1; TLS_SNI="$2"; shift 2 ;;
+    --domain) NODE_FLAGS_GIVEN=1; DOMAIN_SETUP="$2"; shift 2 ;;
+    --traffic-mode) NODE_FLAGS_GIVEN=1; TRAFFIC_MODE="$2"; shift 2 ;;
+    --traffic-period) NODE_FLAGS_GIVEN=1; TRAFFIC_PERIOD="$2"; shift 2 ;;
+    --traffic-start-day) NODE_FLAGS_GIVEN=1; TRAFFIC_START_DAY="$2"; shift 2 ;;
+    --traffic-limit-mode) NODE_FLAGS_GIVEN=1; TRAFFIC_LIMIT_MODE="$2"; shift 2 ;;
+    --traffic-quota) NODE_FLAGS_GIVEN=1; TRAFFIC_QUOTA="$2"; shift 2 ;;
+    --traffic-throttle-rate) NODE_FLAGS_GIVEN=1; TRAFFIC_THROTTLE_RATE="$2"; shift 2 ;;
+    --cover-traffic) NODE_FLAGS_GIVEN=1; COVER_TRAFFIC="$2"; shift 2 ;;
+    --domain-whitelist) NODE_FLAGS_GIVEN=1; DOMAIN_WHITELIST="$2"; shift 2 ;;
+    --preset) NODE_FLAGS_GIVEN=1; if [ "$FRESH_NO_NODE" = "1" ]; then shift 2; else set_preset_vars "$2"; shift 2; fi ;;
     --reinstall) REINSTALL="1"; shift ;;
     -h|--help) usage ;;
     *) echo "未知参数：$1"; usage ;;
@@ -279,7 +295,10 @@ if [ "$REINSTALL" = "1" ] && [ -f "$CFG_FILE" ] && [ -t 0 ]; then
   fi
 fi
 
-# --domain：一键申请证书并切真 TLS（只在全新安装/--reinstall 时跑；
+# 节点参数校验（全新安装不建节点，全部跳过：参数照单收、不报错、不校验；
+# 只有 --reinstall 建节点时才校验）。
+if [ "$FRESH_NO_NODE" != "1" ]; then
+# --domain：一键申请证书并切真 TLS（只在 --reinstall 重装节点时跑；
 # 更新模式上面已经忽略该参数，不走这里）。和手动给证书的
 # --tls-domain/--tls-cert/--tls-key 不能同时用。先以自签 TLS 起服务，
 # 装完再调菜单的 setup_domain 申请证书——申请失败服务仍用自签 TLS，
@@ -372,6 +391,7 @@ if command -v ss >/dev/null 2>&1; then
     fi
   fi
 fi
+fi # FRESH_NO_NODE：全新安装跳过全部节点参数校验
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -z "$BIN" ]; then
@@ -400,15 +420,19 @@ if [ -z "$BIN" ]; then
 fi
 if [ ! -f "$BIN" ]; then echo "服务端二进制不存在：$BIN"; exit 1; fi
 
-# 节点名：全新安装/重装时，没传 --name 就交互问一句，留空用默认 mm-x；
+# 节点名：--reinstall 重装节点时，没传 --name 就交互问一句，留空用默认 mm-x；
 # 只在 stdin 是终端时才问——一键命令是管道（curl | bash）、
 # 自动化脚本的 stdin 也不是终端，这时直接用默认，不许卡住等输入。
-# 已安装更新模式不问（节点名沿用现有配置）。
-if [ "$UPDATE_ONLY" = "0" ] && [ "$NAME_SET" = "0" ] && [ -t 0 ]; then
+# 全新安装不建节点、不问；已安装更新模式不问（节点名沿用现有配置）。
+if [ "$UPDATE_ONLY" = "0" ] && [ "$FRESH_NO_NODE" != "1" ] && [ "$NAME_SET" = "0" ] && [ -t 0 ]; then
   read -r -p "节点名（留空用默认 mm-x）： " NAME_INPUT || true
   if [ -n "$NAME_INPUT" ]; then NAME="$NAME_INPUT"; fi
 fi
 
+if [ "$FRESH_NO_NODE" = "1" ]; then
+echo "== 安装 mm-x 服务端（只装程序，不建节点） =="
+echo "本次只安装服务端二进制和管理菜单，不创建节点；装完进入菜单，用第 1 项添加节点。"
+else
 echo "== 安装 mm-x 服务端 =="
 TLS_MODE_DESC="关"
 [ -n "$TLS_DOMAIN" ] && TLS_MODE_DESC="真 TLS（$TLS_DOMAIN）"
@@ -418,6 +442,7 @@ if [ "$TRAFFIC_QUOTA" = "0" ]; then
   echo "流量统计：模式 $TRAFFIC_MODE，周期 $TRAFFIC_PERIOD（每月 $TRAFFIC_START_DAY 日起），不限额（只统计，不限制）"
 else
   echo "流量统计：模式 $TRAFFIC_MODE，周期 $TRAFFIC_PERIOD（每月 $TRAFFIC_START_DAY 日起），限额 $TRAFFIC_QUOTA，超限后 $TRAFFIC_LIMIT_MODE"
+fi
 fi
 
 # 1) 装二进制（更新模式下 BIN 就是已安装的文件，跳过自复制）
@@ -437,6 +462,8 @@ fi
 
 # 2) 密钥：/etc/mmx/psk 没有就生成（64 位十六进制，32 字节），有了就保留——
 #    重装/更新不换密钥；轮换密钥已从主菜单移除（直接改 /etc/mmx/psk，服务端自动识别，24 小时内新旧密钥都能用）
+#    全新安装不建节点，跳过（密钥在菜单第 1 项添加节点时生成）。
+if [ "$FRESH_NO_NODE" != "1" ]; then
 mkdir -p "$CFG_DIR"
 if [ -f "$PSK_FILE" ]; then
   echo "密钥文件已存在（$PSK_FILE），保留旧密钥，不重新生成"
@@ -449,13 +476,16 @@ else
   chmod 600 "$PSK_FILE"
   echo "已生成新密钥：$PSK_FILE（只保存在这台机器上，不要发给别人）"
 fi
+fi
 
-# 3) BBR 默认开：开不了只警告，绝不因为开不了就装失败（测试模式跳过）
-echo "== 开启 BBR =="
-if [ -n "${MMX_TEST_ROOT:-}" ]; then
-  echo "测试模式：跳过 BBR"
-else
-  BBR_OK=0
+# BBR：系统调优，节点用。开不了只警告，绝不因此失败（测试模式跳过）。
+enable_bbr() {
+  echo "== 开启 BBR =="
+  if [ -n "${MMX_TEST_ROOT:-}" ]; then
+    echo "测试模式：跳过 BBR"
+    return 0
+  fi
+  local BBR_OK=0
   if sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null && sysctl -w net.core.default_qdisc=fq 2>/dev/null; then
     if [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" = "bbr" ]; then
       BBR_OK=1
@@ -468,24 +498,39 @@ else
   else
     echo "警告：BBR 没开成（内核不支持或没有权限），服务端照常运行，只是少了 BBR 的平滑效果"
   fi
+}
+
+# 防火墙放行端口：有哪个工具用哪个，都没有就只提醒。
+open_firewall_port() {
+  echo "== 防火墙放行 $PORT/tcp =="
+  if command -v ufw >/dev/null 2>&1; then
+    ufw allow "$PORT/tcp" >/dev/null 2>&1 || echo "警告：ufw 放行失败，请手动放行 $PORT/tcp"
+    echo "已用 ufw 放行 $PORT/tcp"
+  elif command -v firewall-cmd >/dev/null 2>&1; then
+    firewall-cmd --add-port="$PORT/tcp" --permanent >/dev/null 2>&1 || echo "警告：firewalld 放行失败，请手动放行 $PORT/tcp"
+    firewall-cmd --reload >/dev/null 2>&1 || true
+    echo "已用 firewalld 放行 $PORT/tcp"
+  else
+    echo "警告：没找到 ufw/firewall-cmd，请在云服务商的安全组 / 防火墙里手动放行 $PORT/tcp，否则连不上"
+  fi
+}
+
+# 3) BBR 默认开：开不了只警告，绝不因为开不了就装失败（测试模式跳过）
+#    全新安装不建节点，跳过（BBR 在菜单第 1 项添加节点时开；--reinstall 建节点时也开）。
+if [ "$FRESH_NO_NODE" != "1" ]; then
+  enable_bbr
 fi
 
 # 4) 防火墙放行端口（有哪个工具用哪个，都没有就只提醒）
-echo "== 防火墙放行 $PORT/tcp =="
-if command -v ufw >/dev/null 2>&1; then
-  ufw allow "$PORT/tcp" >/dev/null 2>&1 || echo "警告：ufw 放行失败，请手动放行 $PORT/tcp"
-  echo "已用 ufw 放行 $PORT/tcp"
-elif command -v firewall-cmd >/dev/null 2>&1; then
-  firewall-cmd --add-port="$PORT/tcp" --permanent >/dev/null 2>&1 || echo "警告：firewalld 放行失败，请手动放行 $PORT/tcp"
-  firewall-cmd --reload >/dev/null 2>&1 || true
-  echo "已用 firewalld 放行 $PORT/tcp"
-else
-  echo "警告：没找到 ufw/firewall-cmd，请在云服务商的安全组 / 防火墙里手动放行 $PORT/tcp，否则连不上"
+#    全新安装不建节点、没端口可放，跳过（在菜单第 1 项添加节点时按它的端口放行）。
+if [ "$FRESH_NO_NODE" != "1" ]; then
+  open_firewall_port
 fi
 
 # 5) 拉黑白名单：--whitelist-ip（可重复）写进启动参数；--whitelist-file 复制到 /etc/mmx/whitelist 再写进启动参数
+#    全新安装不建节点，跳过（白名单文件没配置可写）。
 WHITELIST_FILE_INSTALLED=""
-if [ -n "$WHITELIST_FILE" ]; then
+if [ "$FRESH_NO_NODE" != "1" ] && [ -n "$WHITELIST_FILE" ]; then
   if [ ! -f "$WHITELIST_FILE" ]; then echo "拉黑白名单文件不存在：$WHITELIST_FILE"; exit 1; fi
   install -m 600 "$WHITELIST_FILE" "$CFG_DIR/whitelist"
   WHITELIST_FILE_INSTALLED="$CFG_DIR/whitelist"
@@ -493,8 +538,9 @@ if [ -n "$WHITELIST_FILE" ]; then
 fi
 
 # 5b) 连接白名单：--allow-ip（可重复，IP 或 CIDR）写进启动参数；--allowlist-file 复制到 /etc/mmx/allowlist 再写进启动参数
+#    全新安装不建节点，跳过。
 ALLOWLIST_FILE_INSTALLED=""
-if [ -n "$ALLOWLIST_FILE" ]; then
+if [ "$FRESH_NO_NODE" != "1" ] && [ -n "$ALLOWLIST_FILE" ]; then
   if [ ! -f "$ALLOWLIST_FILE" ]; then echo "连接白名单文件不存在：$ALLOWLIST_FILE"; exit 1; fi
   install -m 600 "$ALLOWLIST_FILE" "$CFG_DIR/allowlist"
   ALLOWLIST_FILE_INSTALLED="$CFG_DIR/allowlist"
@@ -502,6 +548,8 @@ if [ -n "$ALLOWLIST_FILE" ]; then
 fi
 
 # 6) 探测公网 IP（--host 优先），写进配置文件（菜单拼链接时用）
+#    全新安装不建节点、不写配置，跳过（菜单第 1 项添加节点时会再探测）。
+if [ "$FRESH_NO_NODE" != "1" ]; then
 if [ -z "$HOST" ]; then
   HOST="$(curl -s --max-time 5 https://checkip.amazonaws.com 2>/dev/null || true)"
   if [ -z "$HOST" ]; then HOST="$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null || true)"; fi
@@ -518,11 +566,15 @@ if [ -z "$HOST" ]; then
   echo "警告：探测不到公网 IP，菜单里拼链接时会用占位地址，记得在菜单第 3 项里把服务器地址改成你的 VPS 公网 IP 或域名"
   HOST=""
 fi
+fi
 
 # 7) 写配置文件 /etc/mmx/config：全部参数都在这里，菜单改参数就改这个文件，
 #    再由菜单按它重新生成服务文件（改错了重启失败会自动回滚）。
-#    只在全新安装或 --reinstall 时写；已安装更新模式跳过，节点配置原样保留。
-if [ "$UPDATE_ONLY" = "0" ]; then
+#    只在 --reinstall 重装节点时写；已安装更新模式跳过，节点配置原样保留；
+#    全新安装不建节点，不写配置（节点在菜单第 1 项添加时写）。
+if [ "$UPDATE_ONLY" = "1" ]; then
+echo "已安装节点：跳过写配置（$CFG_FILE 原样保留）"
+elif [ "$REINSTALL" = "1" ]; then
 WHITELIST_IPS_STR="${WHITELIST_IPS[*]:-}"
 ALLOW_IPS_STR="${ALLOW_IPS[*]:-}"
 {
@@ -531,7 +583,7 @@ ALLOW_IPS_STR="${ALLOW_IPS[*]:-}"
 chmod 600 "$CFG_FILE"
 echo "配置文件已写入：$CFG_FILE"
 else
-echo "已安装节点：跳过写配置（$CFG_FILE 原样保留）"
+echo "全新安装：不创建节点，不写配置文件（节点在菜单第 1 项添加）。"
 fi
 
 # 8) 写管理菜单 /usr/local/bin/mmx：输入 mmx 呼出。
@@ -737,6 +789,7 @@ apply_config() {
   cp -f "$SVC_FILE" "$SVC_FILE.bak" 2>/dev/null || true
   save_config
   write_service
+  svc_enable || true
   svc_reload || true
   if svc_restart && svc_is_active; then
     rm -f "$CFG_FILE.bak" "$SVC_FILE.bak"
@@ -875,7 +928,7 @@ show_link() {
   esac
   load_config
   if [ ! -x "$SERVER_BIN" ]; then echo "服务端程序不在：$SERVER_BIN（被删了？请重装）"; return 1; fi
-  if [ -z "$PORT" ]; then echo "配置缺失（没有端口），请重装服务端。"; return 1; fi
+  if [ -z "$PORT" ]; then echo "还没有节点，请用第 1 项添加节点。"; return 1; fi
   local host link
   if [ -n "$TLS_DOMAIN" ]; then host="$TLS_DOMAIN"; else host="${HOST:-}"; fi
   link="$(build_link "$host" "$fmt")"
@@ -894,7 +947,7 @@ show_link() {
 show_nodes() {
   load_config
   if [ ! -x "$SERVER_BIN" ]; then echo "服务端程序不在：$SERVER_BIN（被删了？请重装）"; return 1; fi
-  if [ -z "$PORT" ]; then echo "配置缺失（没有端口），请重装服务端。"; return 1; fi
+  if [ -z "$PORT" ]; then echo "还没有节点，请用第 1 项添加节点。"; return 1; fi
   local host1 link1
   if [ -n "$TLS_DOMAIN" ]; then host1="$TLS_DOMAIN"
   elif [ -n "${HOST:-}" ]; then host1="$HOST"
@@ -978,6 +1031,8 @@ rotate_key() {
 # 8) 修改限速：显示当前值，rate/burst 一起改；严格 50 Mbps = rate=6250K burst=0
 change_rate() {
   load_config
+  # 没节点时没东西可改，拒绝（否则会写出端口为空的坏配置）。
+  if [ -z "$PORT" ]; then echo "还没有节点，请先用第 1 项添加节点。"; return 0; fi
   echo "当前限速：rate=$RATE（字节/秒），burst=$BURST"
   echo "严格 50 Mbps：rate=6250K burst=0；不限速：rate=0"
   local nr nb
@@ -1134,12 +1189,15 @@ traffic_menu() {
 #    阿里云CDT：180G / 最大值 / 月 / 1日 / TC 限速 / 不限速 / 无白名单。
 #    180G = 阿桑说的 200G 减 20G 余量；125K ≈ 1 Mbps（超限后 TC 限速值）。
 #    只改流量相关字段（TRAFFIC_* 和 RATE）和域名白名单，不动端口/密钥/SNI；
-#    选完预设后可顺手填域名（留空跳过）：填了就先跑 setup_domain 申请证书
-#    切真 TLS（失败也不影响载入预设，域名可稍后再设）。
+#    选完预设后可顺手选域名还是 IP：选域名就先跑 setup_domain 申请证书
+#    切真 TLS（失败也不影响载入预设，域名可稍后再设），选 IP 就只载入预设。
 #    （vx 的地区/SNI 是 VLESS 专属，mm-x 没有，不带过来；白名单是服务端
 #    按域名过滤，和 vx 的 geosite:google 路由效果一样。）
 apply_preset() {
   local name="$1"
+  load_config
+  # 没节点时没端口可写，拒绝（否则会写出端口为空的坏配置）。
+  if [ -z "$PORT" ]; then echo "还没有节点，请先用第 1 项添加节点，再载入预设。"; return 1; fi
   case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in
     gcp|1|谷歌|谷歌云)
       TRAFFIC_MODE="total"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
@@ -1161,6 +1219,9 @@ apply_preset() {
 }
 
 preset_menu() {
+  load_config
+  # 没节点时先拒绝，别让用户走完一整套选择才发现预设没处可载。
+  if [ -z "$PORT" ]; then echo "还没有节点，请先用第 1 项添加节点，再载入预设。"; return 0; fi
   while true; do
     load_config
     echo ""
@@ -1168,15 +1229,16 @@ preset_menu() {
     echo "当前：限额 ${TRAFFIC_QUOTA:-0}　统计模式：$(traffic_mode_label)　周期：$(traffic_period_label)　限制模式：$(traffic_limit_label)　域名白名单：$([ -n "${DOMAIN_WHITELIST:-}" ] && echo "仅谷歌系域名" || echo "关闭")"
     echo "1) GCP：180G / 总计 / 月 / 1日 / TC 限速 / 不限速 / 白名单仅谷歌系"
     echo "2) 阿里云CDT：180G / 最大值 / 月 / 1日 / TC 限速 / 不限速 / 无白名单"
-    echo "选完预设后会问域名（留空跳过），填了就同时申请证书切真 TLS。"
+    echo "选完预设后会问域名还是 IP：选域名就同时申请证书切真 TLS，选 IP 就只载入预设。"
     echo "0) 返回"
     local c
     read -r -p "选一项： " c || return 0
     case "$c" in
       1|2)
         local pname="GCP"; [ "$c" = "2" ] && pname="阿里云CDT"
-        local dom
-        read -r -p "设置域名（留空跳过；DNS 须先指到本机、80 端口空闲）： " dom || continue
+        # 用域名还是 IP：明确选（替代原来"设置域名、留空跳过"）。
+        ask_domain_or_ip || continue
+        local dom="$ASK_DOM"
         local tls_note="不动端口/密钥/TLS"
         [ -n "$dom" ] && tls_note="不动端口/密钥；同时设置域名 $dom（申请 Let's Encrypt 证书并切真 TLS）"
         if [ "$c" = "1" ]; then
@@ -1247,6 +1309,9 @@ resolve_domain_ips() {
 # 用法：setup_domain <域名>
 setup_domain() {
   local dom="${1:-}"
+  load_config
+  # 没节点时没端口可写，拒绝（否则会写出端口为空的坏配置）。
+  if [ -z "$PORT" ]; then echo "还没有节点，请先用第 1 项添加节点。"; return 1; fi
   valid_domain "$dom" || { echo "域名不对：$dom（应为域名，例如 example.com；不要带 http:// 或端口）"; return 1; }
   if [ -n "${TLS_DOMAIN:-}" ]; then
     if [ "$TLS_DOMAIN" = "$dom" ]; then
@@ -1445,6 +1510,34 @@ tls_menu() {
 #    （重载 + 重启，失败自动回滚），再跑 setup_domain（填了域名才跑，
 #    失败也不影响已建好的节点，域名可稍后在载入预设里再设）。
 #    服务器地址空着时自动探测公网 IP；密钥文件没有就生成一个（和安装流程一样）。
+# 问用域名还是 IP：明确选，不再是"域名可选、留空跳过"。
+# 选域名：接着问域名（不能为空），走 setup_domain 申请证书切真 TLS；
+# 选 IP：不问域名、不跑 setup_domain，用探测到的公网 IP、TLS 关。
+# 成功返回 0，域名写进 $ASK_DOM（选 IP 时为空）；EOF/取消返回 1。
+# 用法：ask_domain_or_ip || return 0（向导里）/ || continue（菜单循环里）
+ASK_DOM=""
+ask_domain_or_ip() {
+  ASK_DOM=""
+  local choice
+  while true; do
+    echo "用域名还是 IP 安装节点？"
+    echo "  1) 域名：用域名安装，自动申请 Let's Encrypt 证书并切真 TLS（DNS 须先指到本机、80 端口空闲）"
+    echo "  2) IP：用公网 IP 安装，不设域名、不申请证书（TLS 关）"
+    read -r -p "选一项 [1/2]： " choice || return 1
+    case "$choice" in
+      1)
+        while true; do
+          read -r -p "域名： " ASK_DOM || return 1
+          [ -n "$ASK_DOM" ] && break
+          echo "域名不能为空，请输入域名（或按 Ctrl-C 取消）。"
+        done
+        return 0 ;;
+      2) ASK_DOM=""; return 0 ;;
+      *) echo "没有这个选项，请输入 1 或 2。" ;;
+    esac
+  done
+}
+
 add_node() {
   load_config
   if [ -f "$CFG_FILE" ]; then
@@ -1509,8 +1602,13 @@ add_node() {
     chmod 600 "$PSK_FILE"
   fi
   PORT="$np"; NAME="$nm"; TRAFFIC_QUOTA="$nq"; TRAFFIC_START_DAY="$nd"; TRAFFIC_THROTTLE_RATE="$nt"
-  local dom
-  read -r -p "域名（留空跳过；DNS 须先指到本机、80 端口空闲）： " dom || dom=""
+  # 用域名还是 IP：明确选（替代原来末尾"域名可选、留空跳过"）。
+  ask_domain_or_ip || return 0
+  local dom="$ASK_DOM"
+  if [ -z "$dom" ]; then
+    # 选 IP：不用域名，TLS 关——不沿用旧节点的真 TLS/自签设置（IP 节点就是 TLS 关）。
+    TLS_DOMAIN=""; TLS_CERT=""; TLS_KEY=""; TLS_AUTO="0"; TLS_SNI=""
+  fi
   local summary="添加节点：端口 $PORT，节点名 $NAME，限额 $TRAFFIC_QUOTA，起始日 $TRAFFIC_START_DAY 日，超限 $(traffic_limit_label)"
   [ -n "$dom" ] && summary="$summary，域名 $dom"
   if apply_config "$summary"; then
@@ -1520,6 +1618,9 @@ add_node() {
         load_config
       fi
     fi
+    # 节点建好了：开 BBR + 按它的端口放行防火墙（全新安装时这两步跳过，建节点时补上）。
+    enable_bbr
+    open_firewall_port
   fi
 }
 
@@ -1529,6 +1630,9 @@ add_node() {
 #    第 13 项是域名白名单（off 关 / google 只放行谷歌系域名），
 #    第 14 项是 IP 链接开关（在第 5 项查看节点里同时显示 IP 地址的链接）。
 edit_params() {
+  load_config
+  # 没节点时没东西可改，拒绝（否则会写出端口为空的坏配置）。
+  if [ -z "$PORT" ]; then echo "还没有节点，请先用第 1 项添加节点。"; return 0; fi
   while true; do
     load_config
     echo ""
@@ -1810,6 +1914,8 @@ echo "管理菜单已安装：$BIN_DIR/mmx（输入 mmx 呼出，旧的 mm 也�
 
 # 9) 服务文件：按配置文件生成（菜单改参数也是同一份逻辑），开机自启、崩溃自动重启
 #    systemd 写单元文件，OpenRC 写 /etc/init.d/mmx-server。
+#    全新安装不建节点、没配置可写，跳过（服务文件在菜单第 1 项添加节点时生成）。
+if [ "$FRESH_NO_NODE" != "1" ]; then
 echo "== 写入服务文件 =="
 "$BIN_DIR/mmx" --write-service
 mkdir -p "$SVC_DIR"
@@ -1838,6 +1944,7 @@ else
   echo "服务启动失败，请看日志：$(svc_log_cmd)"
   exit 1
 fi
+fi
 
 if [ "$UPDATE_ONLY" = "1" ]; then
 echo ""
@@ -1847,6 +1954,16 @@ echo "端口：$PORT（不变）；限速：$RATE；TLS：$TLS_MODE_DESC；节�
 echo "密钥文件：$PSK_FILE（未变）；配置文件：$CFG_FILE（未动）"
 echo "想改节点参数用 mmx 菜单；想彻底重装节点请加 --reinstall。"
 echo "服务状态：mm 菜单第 6 项，或 $(svc_status_cmd)；日志：mm 菜单第 9 项，或 $(svc_log_follow_cmd)"
+elif [ "$FRESH_NO_NODE" = "1" ]; then
+echo ""
+echo "== 安装完成（只装了程序，未创建节点） =="
+echo "已安装：服务端二进制 $BIN_DIR/mmx-server、管理菜单 $BIN_DIR/mmx（输入 mmx 呼出）。"
+echo "未创建节点：没有密钥、没有配置文件、服务未启动。"
+if [ -n "$NODE_FLAGS_GIVEN" ]; then
+echo "安装参数（--port/--rate/--preset/--traffic-*/--domain 等）已忽略：全新安装不再创建节点，节点参数在菜单里设置（预设也可在菜单第 2 项或 mmx --preset 载入）。"
+fi
+echo "请在菜单第 1 项添加节点（会问端口、节点名、流量限额、域名还是 IP），节点建好后服务自动启动；"
+echo "建好后在菜单第 5 项查看节点（粘贴到 mm-x 客户端就能用，绝不要分享给第二个人）。"
 else
 echo ""
 echo "== 安装完成 =="
@@ -1865,9 +1982,10 @@ echo ""
 echo "输入 mmx 打开管理菜单，在菜单第 5 项查看节点（粘贴到 mm-x 客户端就能用，绝不要分享给第二个人）。"
 fi
 
-# --domain：一键申请证书并切真 TLS（只在全新安装/--reinstall 时跑；
-# 更新模式上面已经忽略该参数，不走这里）。失败也不影响上面装好的自签服务。
-if [ -n "${DOMAIN_SETUP:-}" ] && [ "$UPDATE_ONLY" = "0" ]; then
+# --domain：一键申请证书并切真 TLS（只在 --reinstall 重装节点时跑；
+# 全新安装不建节点、--domain 已忽略，不走这里；更新模式上面已经忽略该参数，不走这里）。
+# 失败也不影响上面装好的自签服务。
+if [ -n "${DOMAIN_SETUP:-}" ] && [ "$UPDATE_ONLY" = "0" ] && [ "$FRESH_NO_NODE" != "1" ]; then
 echo ""
 echo "== 一键设置域名 $DOMAIN_SETUP =="
 if "$BIN_DIR/mmx" --setup-domain "$DOMAIN_SETUP"; then
@@ -1876,4 +1994,30 @@ else
   echo "域名设置失败：服务仍用自签 TLS 继续运行（见上面的报错）；之后可用 mmx 菜单第 3 项（编辑节点）→ 第 10 子项重试。"
   exit 1
 fi
+fi
+
+# 装完进主菜单（全新安装 / 更新 / 重装都一样）：有终端就进菜单，
+# 没终端（管道/自动化）就不挂起，只打印提示后退出。
+# 一键命令 curl | bash 时 stdin 是管道不是终端，但控制终端还在，
+# 这时从 /dev/tty 读菜单输入。测试模式（MMX_TEST_ROOT）下默认不进菜单，
+# 只打印提示，避免测试挂起；MMX_TEST_ENTER_MENU=1 可强制进菜单，
+# 供测试用 pty 覆盖交互路径（生产环境不要设置这个变量）。
+ENTER_MENU=0
+if [ -z "${MMX_TEST_ROOT:-}" ] || [ "${MMX_TEST_ENTER_MENU:-}" = "1" ]; then
+  if [ -t 0 ]; then ENTER_MENU=1;
+  elif { true < /dev/tty; } 2>/dev/null; then ENTER_MENU=1; fi
+fi
+if [ "$ENTER_MENU" = "1" ]; then
+  if [ -t 0 ]; then
+    exec "$BIN_DIR/mmx"
+  else
+    exec "$BIN_DIR/mmx" < /dev/tty
+  fi
+fi
+if [ "$UPDATE_ONLY" = "1" ]; then
+  echo "更新完成，输入 mmx 打开菜单。"
+elif [ "$FRESH_NO_NODE" = "1" ]; then
+  echo "安装完成，输入 mmx 打开菜单添加节点。"
+else
+  echo "安装完成，输入 mmx 打开菜单。"
 fi

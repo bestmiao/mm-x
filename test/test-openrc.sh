@@ -238,18 +238,33 @@ note "测试0：干净 PATH 里确实没有 systemctl/journalctl/apt-get，但�
 [ -n "$(PATH="$OPENRC_PATH" command -v rc-service 2>/dev/null)" ] && ok "干净 PATH 里能找到 rc-service 替身" || bad "干净 PATH 里找不到 rc-service"
 [ -n "$(PATH="$OPENRC_PATH" command -v apk 2>/dev/null)" ] && ok "干净 PATH 里能找到 apk 替身" || bad "干净 PATH 里找不到 apk"
 
-note "测试1：跑部署脚本（--port 18130），应检测到 OpenRC"
+note "测试1：跑部署脚本（--port 18130），应检测到 OpenRC；全新安装只装程序，不建节点"
 PATH="$OPENRC_PATH" bash "$SRC_DIR/install-mm-x-server.sh" --port 18130 --name 测试节点 < /dev/null > "$TEST_ROOT/deploy.log" 2>&1
 DEPLOY_CODE=$?
 [ "$DEPLOY_CODE" = 0 ] && ok "部署脚本退出码 0" || bad "部署脚本退出码 $DEPLOY_CODE（见 deploy.log）"
 ! grep -q "systemctl" "$TEST_ROOT/deploy.log" && ok "部署输出里没提 systemctl（全是 OpenRC 命令）" || bad "部署输出里还提 systemctl"
-grep -q "rc-service mmx-server status" "$TEST_ROOT/deploy.log" && ok "部署完成提示里服务状态命令是 rc-service" || bad "部署完成提示里服务状态命令不对"
+grep -q "只装程序，不建节点" "$TEST_ROOT/deploy.log" && ok "部署输出说明只装程序、不建节点" || bad "部署输出没说只装程序"
+grep -q "已忽略" "$TEST_ROOT/deploy.log" && ok "部署输出说明安装参数已忽略" || bad "部署输出没说安装参数已忽略"
+grep -q "输入 mmx 打开菜单添加节点" "$TEST_ROOT/deploy.log" && ok "部署完成提示让用户输入 mmx 打开菜单添加节点" || bad "部署完成提示不对"
 [ -x "$MM_BIN" ] && ok "/usr/local/bin/mm 存在且可执行" || bad "/usr/local/bin/mm 不存在或不可执行"
 [ -x "$TEST_ROOT/usr/local/bin/mmx-server" ] && ok "mmx-server 二进制已安装" || bad "mmx-server 二进制没装上"
+[ ! -e "$CFG" ] && ok "全新安装不写配置文件" || bad "全新安装写了配置文件（应该不建节点）"
+[ ! -e "$TEST_ROOT/etc/mmx/psk" ] && ok "全新安装不生成密钥" || bad "全新安装生成了密钥（应该不建节点）"
+[ ! -e "$INIT_FILE" ] && ok "全新安装不写 init 脚本" || bad "全新安装写了 init 脚本（应该不建节点）"
+[ ! -e "$UNIT" ] && ok "全新安装不写 systemd 单元文件" || bad "全新安装写了 systemd 单元文件"
+[ ! -e "$TEST_ROOT/svc-state" ] && ok "全新安装后服务未启动" || bad "全新安装后服务被启动了"
+[ ! -e "$TEST_ROOT/rc-service.log" ] && ok "全新安装时没调用 rc-service" || bad "全新安装时调用了 rc-service"
+[ ! -e "$TEST_ROOT/rc-update.log" ] && ok "全新安装时没调用 rc-update" || bad "全新安装时调用了 rc-update"
+
+# 菜单调用辅助：喂给 mm 的输入（用干净 PATH 跑菜单）。
+run_mm() { printf '%b' "$1" | PATH="$OPENRC_PATH" "$MM_BIN" > "$TEST_ROOT/mm-out.txt" 2>&1; cat "$TEST_ROOT/mm-out.txt"; }
+
+note "测试1b：菜单第 1 项添加节点（端口 18130、节点名 测试节点、选 IP）建好节点"
+run_mm '1\n18130\n测试节点\n\n1\n\n\n2\n11\n' | grep -q "用域名还是 IP" && ok "向导里问域名还是 IP（明确选，不是可选收尾）" || bad "向导里没问域名还是 IP"
 has "$CFG" "^PORT=18130$" && ok "配置文件端口 18130" || bad "配置文件端口不对"
-grep -q "add mmx-server default" "$TEST_ROOT/rc-update.log" && ok "部署时 rc-update add mmx-server default（开机自启）" || bad "部署时没调 rc-update add"
-grep -q "restart" "$TEST_ROOT/rc-service.log" && ok "部署时调用了 rc-service restart" || bad "部署时没调用 rc-service restart"
-[ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "部署后服务状态 active" || bad "部署后服务状态不是 active"
+grep -q "add mmx-server default" "$TEST_ROOT/rc-update.log" && ok "加节点时 rc-update add mmx-server default（开机自启）" || bad "加节点时没调 rc-update add"
+grep -q "restart" "$TEST_ROOT/rc-service.log" && ok "加节点时调用了 rc-service restart" || bad "加节点时没调用 rc-service restart"
+[ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "加节点后服务状态 active" || bad "加节点后服务状态不是 active"
 
 note "测试2：OpenRC init 脚本已生成（不是 systemd 单元）"
 [ -f "$INIT_FILE" ] && ok "init 脚本已生成：/etc/init.d/mmx-server" || bad "init 脚本没生成"
@@ -265,9 +280,6 @@ grep -q "command_background=true" "$INIT_FILE" && ok "init 脚本 command_backgr
 EXPECTED_ARGS="--psk-file $TEST_ROOT/etc/mmx/psk --listen 0.0.0.0:18130 --rate 0 --burst 0 --name \"测试节点\" --fallback site --traffic-mode total --traffic-period monthly --traffic-start-day 1 --traffic-limit-mode throttle --traffic-quota 0 --traffic-throttle-rate 125K --traffic-file $TEST_ROOT/etc/mmx/traffic.json --cover-traffic low"
 INIT_ARGS="$(grep '^command_args=' "$INIT_FILE" | sed 's/^command_args="//; s/"$//; s/\\"/"/g')"
 [ "$INIT_ARGS" = "$EXPECTED_ARGS" ] && ok "init 脚本 command_args 和 systemd ExecStart 参数字节一致" || bad "init 脚本 command_args 和预期参数不一致（见 $INIT_FILE）"
-
-# 菜单调用辅助：喂给 mm 的输入（用干净 PATH 跑菜单）。
-run_mm() { printf '%b' "$1" | PATH="$OPENRC_PATH" "$MM_BIN" > "$TEST_ROOT/mm-out.txt" 2>&1; cat "$TEST_ROOT/mm-out.txt"; }
 
 note "测试3：菜单第 5 项查看节点"
 LINK_OUT="$(run_mm '5\n11\n')"

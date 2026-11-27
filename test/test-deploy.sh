@@ -191,17 +191,46 @@ cp "$SRC_DIR/mmx-server-linux-amd64" "$SRC_DIR/mmx-server" 2>/dev/null || true
 note "部署脚本 --help 里有 443 说明"
 bash "$SRC_DIR/install-mm-x-server.sh" --help 2>&1 | grep -q "443" && ok "--help 提到 443（更像 HTTPS、被占怎么办）" || bad "--help 没提 443"
 
-note "测试1：跑部署脚本（--port 18130）"
+note "测试1：全新安装（--port 18130 --name 测试节点）只装程序，不建节点"
 bash "$SRC_DIR/install-mm-x-server.sh" --port 18130 --name 测试节点 < /dev/null > "$TEST_ROOT/deploy.log" 2>&1
 DEPLOY_CODE=$?
 [ "$DEPLOY_CODE" = 0 ] && ok "部署脚本退出码 0" || bad "部署脚本退出码 $DEPLOY_CODE（见 deploy.log）"
 if grep -q "mmx://" "$TEST_ROOT/deploy.log"; then bad "部署输出里打印了 mmx:// 链接（应该只在菜单里看）"; else ok "部署输出里没有 mmx:// 链接"; fi
-grep -q "输入 mmx 打开管理菜单" "$TEST_ROOT/deploy.log" && ok "部署完成提示让用户输入 mmx 打开菜单" || bad "部署完成提示没提 mmx 菜单"
+grep -q "只装程序，不建节点" "$TEST_ROOT/deploy.log" && ok "部署输出说明只装程序、不建节点" || bad "部署输出没说只装程序"
+grep -q "已忽略" "$TEST_ROOT/deploy.log" && ok "部署输出说明安装参数（--port/--name）已忽略" || bad "部署输出没说安装参数已忽略"
+grep -q "输入 mmx 打开菜单添加节点" "$TEST_ROOT/deploy.log" && ok "部署完成提示让用户输入 mmx 打开菜单添加节点" || bad "部署完成提示没提 mmx 菜单"
 [ -x "$MM_BIN" ] && ok "/usr/local/bin/mm 存在且可执行" || bad "/usr/local/bin/mm 不存在或不可执行"
 grep -Fq "printf '\033[32m'" "$MM_BIN" && ok "菜单脚本含绿色 printf（交互菜单统一绿色）" || bad "菜单脚本没有绿色 printf"
 grep -Fq "trap 'printf \"\033[0m\"' EXIT" "$MM_BIN" && ok "菜单脚本含 EXIT 复位 trap（退出时恢复终端颜色）" || bad "菜单脚本没有 EXIT 复位 trap"
-"$MM_BIN" --show-link plain 2>/dev/null | grep -q $'\033' && bad "非交互 --show-link 输出带了 ANSI 颜色码（绿色只该在交互菜单里）" || ok "非交互 --show-link 输出干净（无颜色码）"
 [ -x "$TEST_ROOT/usr/local/bin/mmx-server" ] && ok "mmx-server 二进制已安装" || bad "mmx-server 二进制没装上"
+[ ! -e "$CFG" ] && ok "全新安装不写配置文件" || bad "全新安装写了配置文件（应该不建节点）"
+[ ! -e "$TEST_ROOT/etc/mmx/psk" ] && ok "全新安装不生成密钥" || bad "全新安装生成了密钥（应该不建节点）"
+[ ! -e "$UNIT" ] && ok "全新安装不写服务文件" || bad "全新安装写了服务文件（应该不建节点）"
+[ ! -e "$TEST_ROOT/etc/mmx" ] && ok "全新安装不创建 /etc/mmx 目录" || bad "全新安装创建了 /etc/mmx 目录"
+[ ! -e "$TEST_ROOT/svc-state" ] && ok "全新安装后服务未启动（无状态文件）" || bad "全新安装后服务被启动了"
+! grep -q "restart" "$TEST_ROOT/systemctl.log" 2>/dev/null && ok "全新安装时没调用 systemctl restart" || bad "全新安装时调用了 restart"
+"$MM_BIN" --show-link plain 2>/dev/null | grep -q "还没有节点" && ok "没节点时 --show-link 提示用第 1 项添加节点" || bad "没节点时 --show-link 提示不对"
+"$MM_BIN" --preset gcp > "$TEST_ROOT/mm-out.txt" 2>&1; [ "$?" != 0 ] && grep -q "还没有节点" "$TEST_ROOT/mm-out.txt" && ok "没节点时 --preset gcp 被拒绝并提示先加节点" || bad "没节点时 --preset gcp 没被拒绝"
+[ ! -e "$CFG" ] && ok "被拒的 --preset 没写出坏配置" || bad "被拒的 --preset 写出了配置"
+
+# 菜单调用辅助：喂给 mm 的输入。
+# 注意：mm 的输出先落文件再 cat——不能直接 | grep -q：菜单文本里
+# 本身就印着要找的字（例如第 2 项"开启真 TLS"），grep -q 一匹配就
+# 退出关管道，mm 还没读输入就被 SIGPIPE 杀掉，配置来不及保存
+#（老竞态：基线 68/2 的两处失败就是这么来的）。
+run_mm() { printf '%b' "$1" | "$MM_BIN" > "$TEST_ROOT/mm-out.txt" 2>&1; cat "$TEST_ROOT/mm-out.txt"; }
+
+note "测试1c：不加 --reinstall 再跑脚本（无配置时）仍不建节点"
+bash "$SRC_DIR/install-mm-x-server.sh" --port 19999 < /dev/null > "$TEST_ROOT/deploy-rerun-nocfg.log" 2>&1
+[ "$?" = 0 ] && ok "无配置时再跑退出码 0" || bad "无配置时再跑退出码非 0（见 deploy-rerun-nocfg.log）"
+[ ! -e "$CFG" ] && ok "无配置时再跑仍不写配置文件" || bad "无配置时再跑写了配置文件"
+[ ! -e "$TEST_ROOT/etc/mmx/psk" ] && ok "无配置时再跑仍不生成密钥" || bad "无配置时再跑生成了密钥"
+grep -q "输入 mmx 打开菜单添加节点" "$TEST_ROOT/deploy-rerun-nocfg.log" && ok "无配置时再跑仍提示进菜单加节点" || bad "无配置时再跑提示不对"
+
+note "测试1b：菜单第 1 项添加节点（端口 18130、节点名 测试节点、选 IP）建好节点"
+run_mm '1\n18130\n测试节点\n\n1\n\n\n2\n11\n' | grep -q "用域名还是 IP" && ok "向导里问域名还是 IP（明确选，不是可选收尾）" || bad "向导里没问域名还是 IP"
+run_mm '5\n11\n' | grep -q "mmx://" && ok "加节点后菜单能显示链接" || bad "加节点后菜单没显示链接"
+"$MM_BIN" --show-link plain 2>/dev/null | grep -q $'\033' && bad "非交互 --show-link 输出带了 ANSI 颜色码（绿色只该在交互菜单里）" || ok "非交互 --show-link 输出干净（无颜色码）"
 has "$CFG" "^PORT=18130$" && ok "配置文件端口 18130" || bad "配置文件端口不对"
 has "$CFG" "^RATE=0$" && ok "配置文件默认不限速（RATE=0）" || bad "配置文件限速不对"
 has "$CFG" "^BURST=0$" && ok "配置文件默认突发 0（严格）" || bad "配置文件突发不对"
@@ -211,15 +240,9 @@ PSK="$(cat "$TEST_ROOT/etc/mmx/psk" 2>/dev/null)"
 printf '%s' "$PSK" | grep -Eq '^[0-9a-f]{64}$' && ok "密钥文件是 64 位十六进制" || bad "密钥文件格式不对"
 has "$UNIT" "ExecStart=" && ok "服务文件已生成" || bad "服务文件没生成"
 has "$UNIT" "0.0.0.0:18130" && has "$UNIT" "\-\-rate 0 --burst 0" && has "$UNIT" "\-\-fallback site" && ok "ExecStart 含端口/限速/回退参数" || bad "ExecStart 参数不对"
-grep -q "restart" "$TEST_ROOT/systemctl.log" && ok "部署时调用了 systemctl restart" || bad "部署时没调用 restart"
-[ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "部署后服务状态 active" || bad "部署后服务状态不是 active"
-
-# 菜单调用辅助：喂给 mm 的输入。
-# 注意：mm 的输出先落文件再 cat——不能直接 | grep -q：菜单文本里
-# 本身就印着要找的字（例如第 2 项"开启真 TLS"），grep -q 一匹配就
-# 退出关管道，mm 还没读输入就被 SIGPIPE 杀掉，配置来不及保存
-#（老竞态：基线 68/2 的两处失败就是这么来的）。
-run_mm() { printf '%b' "$1" | "$MM_BIN" > "$TEST_ROOT/mm-out.txt" 2>&1; cat "$TEST_ROOT/mm-out.txt"; }
+grep -q "restart" "$TEST_ROOT/systemctl.log" && ok "加节点时调用了 systemctl restart" || bad "加节点时没调用 restart"
+grep -q "enable" "$TEST_ROOT/systemctl.log" && ok "加节点时调用了 systemctl enable（开机自启）" || bad "加节点时没调用 enable"
+[ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "加节点后服务状态 active" || bad "加节点后服务状态不是 active"
 
 note "测试2：菜单第 5 项查看节点（默认只显示一条）"
 LINK_OUT="$(run_mm '5\n11\n')"
@@ -373,16 +396,16 @@ has "$CFG" "^COVER_TRAFFIC=low$" && ok "恢复后配置掩护档位是 low" || b
 
 note "测试15：菜单第 2 项载入预设（GCP / 阿里云CDT）"
 run_mm '2\n0\n11\n' | grep -q "阿里云CDT" && ok "预设菜单显示 GCP/阿里云CDT" || bad "预设菜单显示不对"
-run_mm '2\n1\n\ny\n0\n11\n' | grep -q "载入预设" && ok "载入 GCP 提示正常" || bad "载入 GCP 提示不对"
+run_mm '2\n1\n2\ny\n0\n11\n' | grep -q "载入预设" && ok "载入 GCP 提示正常" || bad "载入 GCP 提示不对"
 has "$CFG" "^TRAFFIC_MODE=total$" && has "$CFG" "^TRAFFIC_QUOTA=180G$" && has "$CFG" "^TRAFFIC_PERIOD=monthly$" && has "$CFG" "^TRAFFIC_START_DAY=1$" && ok "GCP 配置：total/180G/月/1日" || bad "GCP 配置值不对"
 has "$CFG" "^TRAFFIC_LIMIT_MODE=throttle$" && has "$CFG" "^TRAFFIC_THROTTLE_RATE=125K$" && has "$CFG" "^RATE=0$" && ok "GCP 配置：throttle/125K/不限速" || bad "GCP 配置限制值不对"
 has "$UNIT" "\-\-traffic-mode total" && has "$UNIT" "\-\-traffic-quota 180G" && ok "GCP 服务文件已更新" || bad "GCP 服务文件没更新"
 has "$CFG" "^DOMAIN_WHITELIST=google$" && ok "GCP 配置：域名白名单 google" || bad "GCP 配置白名单不对"
 has "$UNIT" "\-\-domain-whitelist google" && ok "GCP 服务文件有白名单参数" || bad "GCP 服务文件缺白名单参数"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "载入 GCP 后服务仍在运行" || bad "载入 GCP 后服务停了"
-run_mm '2\n2\n\nn\n0\n11\n' | grep -q "已取消" && ok "取消载入提示正常" || bad "取消载入提示不对"
+run_mm '2\n2\n2\nn\n0\n11\n' | grep -q "已取消" && ok "取消载入提示正常" || bad "取消载入提示不对"
 has "$CFG" "^TRAFFIC_MODE=total$" && ok "取消后配置保持 GCP" || bad "取消后配置被改了"
-run_mm '2\n2\n\ny\n0\n11\n' | grep -q "载入预设" && ok "载入 CDT 提示正常" || bad "载入 CDT 提示不对"
+run_mm '2\n2\n2\ny\n0\n11\n' | grep -q "载入预设" && ok "载入 CDT 提示正常" || bad "载入 CDT 提示不对"
 has "$CFG" "^TRAFFIC_MODE=max$" && has "$CFG" "^TRAFFIC_QUOTA=180G$" && ok "CDT 配置：max/180G" || bad "CDT 配置值不对"
 has "$UNIT" "\-\-traffic-mode max" && ok "CDT 服务文件已更新" || bad "CDT 服务文件没更新"
 has "$CFG" "^DOMAIN_WHITELIST=''$" && ok "CDT 配置：域名白名单关闭" || bad "CDT 配置白名单没关"
@@ -466,20 +489,26 @@ has "$CFG" "^TLS_DOMAIN=menu.example$" && has "$CFG" "^TLS_AUTO=0$" && ok "菜�
 grep -q "reuse_key = True" "$TEST_ROOT/etc/letsencrypt/renewal/menu.example.conf" && ok "菜单一键后续期配置也有 reuse_key = True" || bad "菜单一键后续期配置没有 reuse_key"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "菜单一键后服务仍在运行" || bad "菜单一键后服务停了"
 
-note "测试15d：菜单第 1 项添加节点（向导：非法输入重问 + 全填值 + 覆盖确认）"
-run_mm '1\ny\n99999\n18140\n\n180G\n1\n\n\n\n11\n' | grep -q "端口不合法" && ok "向导里非法端口 99999 被拒绝并重问" || bad "向导里非法端口没被拒绝"
+note "测试15d：菜单第 1 项添加节点（向导：非法输入重问 + 全填值 + 覆盖确认 + 域名/IP 选择）"
+# 此时真 TLS 是 menu.example（测试 15c-8）：选域名 other.example 应被拒绝（已经开了），节点照常建成，TLS 配置不变。
+run_mm '1\ny\n99999\n18140\n\n180G\n1\n\n\n1\nother.example\n11\n' | grep -q "端口不合法" && ok "向导里非法端口 99999 被拒绝并重问" || bad "向导里非法端口没被拒绝"
 has "$CFG" "^PORT=18140$" && ok "向导建节点后端口是 18140" || bad "向导建节点后端口不对"
 has "$CFG" "^TRAFFIC_QUOTA=180G$" && has "$CFG" "^TRAFFIC_START_DAY=1$" && has "$CFG" "^TRAFFIC_LIMIT_MODE=throttle$" && has "$CFG" "^TRAFFIC_THROTTLE_RATE=125K$" && ok "向导建节点后流量设置正确（180G/1日/限速/125K）" || bad "向导建节点后流量设置不对"
 has "$CFG" "^NAME=mm-x$" && ok "向导里节点名空输入用默认 mm-x" || bad "向导里节点名默认值不对"
+has "$CFG" "^TLS_DOMAIN=menu.example$" && ok "向导域名失败后真 TLS 配置没变（仍是 menu.example）" || bad "向导域名失败后 TLS 配置被改了"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "向导建节点后服务仍在运行" || bad "向导建节点后服务停了"
 run_mm '1\nn\n11\n' | grep -q "已有节点" && ok "已有节点时向导先提示覆盖，选 n 取消" || bad "已有节点时向导没提示覆盖"
 [ "$(cat "$CFG" | grep -c "^PORT=18140$")" = "1" ] && ok "取消覆盖后配置没变" || bad "取消覆盖后配置被改了"
-run_mm '1\ny\n18141\n测试节点2\n500G\n15\nblock\n1M\nother.example\n11\n' | grep -q "添加节点" && ok "确认覆盖后向导能重建节点" || bad "确认覆盖后向导重建失败"
-run_mm '1\ny\n18141\n测试节点2\n500G\n15\nblock\n1M\nother.example\n11\n' | grep -q "已经开了" && ok "向导里域名已被占用时提示先关闭（节点照常建成）" || bad "向导域名失败提示不对"
-has "$CFG" "^TLS_DOMAIN=menu.example$" && ok "向导域名失败后真 TLS 配置没变（仍是 menu.example）" || bad "向导域名失败后 TLS 配置被改了"
+run_mm '1\ny\n18141\n测试节点2\n500G\n15\nblock\n1M\n1\nother.example\n11\n' | grep -q "已经开了" && ok "向导里域名已被占用时提示先关闭（节点照常建成）" || bad "向导域名失败提示不对"
+has "$CFG" "^TLS_DOMAIN=menu.example$" && ok "第二次域名失败后真 TLS 配置仍没变" || bad "第二次域名失败后 TLS 配置被改了"
 has "$CFG" "^PORT=18141$" && has "$CFG" "^TRAFFIC_QUOTA=500G$" && has "$CFG" "^TRAFFIC_START_DAY=15$" && has "$CFG" "^TRAFFIC_LIMIT_MODE=block$" && has "$CFG" "^TRAFFIC_THROTTLE_RATE=1M$" && ok "重建后配置正确（18141/500G/15日/阻断/1M）" || bad "重建后配置不对"
 ( . "$CFG"; [ "$NAME" = "测试节点2" ] ) && ok "重建后节点名是 测试节点2" || bad "重建后节点名不对"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "重建节点后服务仍在运行" || bad "重建节点后服务停了"
+# 选 IP 重建：TLS 应关掉（不沿用旧节点的真 TLS）。
+run_mm '1\ny\n18142\nIP节点\n\n1\n\n\n2\n11\n' | grep -q "添加节点" && ok "选 IP 重建节点提示正常" || bad "选 IP 重建节点提示不对"
+has "$CFG" "^PORT=18142$" && ok "选 IP 重建后端口是 18142" || bad "选 IP 重建后端口不对"
+has "$CFG" "^TLS_DOMAIN=''$" && has "$CFG" "^TLS_AUTO=0$" && ok "选 IP 重建后 TLS 已关（不沿用旧真 TLS）" || bad "选 IP 重建后 TLS 没关"
+[ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "选 IP 重建后服务仍在运行" || bad "选 IP 重建后服务停了"
 
 note "测试15e：菜单第 4 项删除节点（取消 / 确认删除 / 程序菜单保留 / 重建）"
 run_mm '4\nn\n11\n' | grep -q "已取消" && ok "删除节点时选 n 取消" || bad "删除节点取消提示不对"
@@ -493,26 +522,35 @@ run_mm '4\ny\n11\n' | grep -q "节点已删除" && ok "确认删除后提示节�
 [ -x "$MM_BIN" ] && ok "删除后菜单命令还在" || bad "删除后菜单命令没了"
 [ -f "$UNIT" ] && ok "删除后服务文件还在" || bad "删除后服务文件没了"
 run_mm '4\n11\n' | grep -q "没有节点配置" && ok "没节点时删除提示不用删除" || bad "没节点时删除提示不对"
-run_mm '1\n\n\n\n\n\n\n\n11\n' | grep -q "添加节点" && ok "删除后可用添加节点重建（全默认）" || bad "删除后添加节点重建失败"
+run_mm '1\n\n\n\n\n\n\n2\n11\n' | grep -q "添加节点" && ok "删除后可用添加节点重建（全默认）" || bad "删除后添加节点重建失败"
 [ -f "$CFG" ] && has "$CFG" "^PORT=443$" && ok "重建后节点是默认端口 443" || bad "重建后节点端口不对"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "重建后服务仍在运行" || bad "重建后服务停了"
 
 
 note "测试15f：菜单第 2 项载入预设时顺手设域名（成功 / 失败也不影响预设）"
-run_mm '2\n2\ngood.example\ny\n0\n11\n' | grep -q "域名设置完成" && ok "预设 CDT + 域名 good.example 时提示域名设置完成" || bad "预设 + 域名成功提示不对"
+run_mm '2\n2\n1\ngood.example\ny\n0\n11\n' | grep -q "域名设置完成" && ok "预设 CDT + 域名 good.example 时提示域名设置完成" || bad "预设 + 域名成功提示不对"
 has "$CFG" "^TLS_DOMAIN=good.example$" && has "$CFG" "^TRAFFIC_MODE=max$" && has "$CFG" "^TRAFFIC_QUOTA=180G$" && ok "预设 + 域名成功后配置是真 TLS + CDT（max/180G）" || bad "预设 + 域名成功后配置不对"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "预设 + 域名成功后服务仍在运行" || bad "预设 + 域名成功后服务停了"
-run_mm '2\n1\nother.example\ny\n0\n11\n' | grep -q "已经开了" && ok "预设 GCP + 已占用域名时提示先关闭（域名失败）" || bad "预设 + 占用域名时提示不对"
+run_mm '2\n1\n1\nother.example\ny\n0\n11\n' | grep -q "已经开了" && ok "预设 GCP + 已占用域名时提示先关闭（域名失败）" || bad "预设 + 占用域名时提示不对"
 has "$CFG" "^TRAFFIC_MODE=total$" && has "$CFG" "^DOMAIN_WHITELIST=google$" && ok "域名失败后预设 GCP 照常载入（total/谷歌白名单）" || bad "域名失败后预设没载入"
 has "$CFG" "^TLS_DOMAIN=good.example$" && ok "域名失败后真 TLS 配置没变（仍是 good.example）" || bad "域名失败后 TLS 配置被改了"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "域名失败、预设照常载入后服务仍在运行" || bad "域名失败后服务停了"
 
 note "测试15g：菜单第 1 项添加节点时顺手设域名（成功）"
 run_mm '3\n10\n3\n0\n0\n11\n' | grep -q "关闭真 TLS" && ok "先关真 TLS（为向导域名成功腾地方）" || bad "关真 TLS 失败"
-run_mm '1\ny\n18150\n向导域名\n100G\n5\nthrottle\n200K\nmenu.example\n11\n' | grep -q "域名设置完成" && ok "向导 + 域名 menu.example 时提示域名设置完成" || bad "向导 + 域名成功提示不对"
+run_mm '1\ny\n18150\n向导域名\n100G\n5\nthrottle\n200K\n1\nmenu.example\n11\n' | grep -q "域名设置完成" && ok "向导 + 域名 menu.example 时提示域名设置完成" || bad "向导 + 域名成功提示不对"
 has "$CFG" "^PORT=18150$" && has "$CFG" "^TLS_DOMAIN=menu.example$" && has "$CFG" "^TRAFFIC_QUOTA=100G$" && ok "向导 + 域名成功后配置正确（18150/真 TLS menu.example/100G）" || bad "向导 + 域名成功后配置不对"
 ( . "$CFG"; [ "$NAME" = "向导域名" ] ) && ok "向导 + 域名成功后节点名是 向导域名" || bad "向导 + 域名成功后节点名不对"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "向导 + 域名成功后服务仍在运行" || bad "向导 + 域名成功后服务停了"
+note "测试15h：添加节点向导里域名/IP 选择（无效选项重问、选域名时空域名重问）"
+run_mm '1\ny\n18160\n选择测试\n\n1\n\n\n3\n2\n11\n' | grep -q "没有这个选项" && ok "向导里无效选择 3 被拒绝并重问" || bad "向导里无效选择没被拒绝"
+has "$CFG" "^PORT=18160$" && ok "重问后选 IP 建好节点（端口 18160）" || bad "重问后选 IP 没建好节点"
+has "$CFG" "^TLS_DOMAIN=''$" && ok "选 IP 建节点时 TLS 是关的（没设域名）" || bad "选 IP 建节点时 TLS 不该开"
+[ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "选 IP 建节点后服务仍在运行" || bad "选 IP 建节点后服务停了"
+run_mm '1\ny\n18161\n空域名测试\n\n1\n\n\n1\n\nmenu.example\n11\n' | grep -q "域名不能为空" && ok "选域名时空域名被拒绝并重问" || bad "选域名时空域名没被拒绝"
+has "$CFG" "^PORT=18161$" && ok "空域名重问后建好节点（端口 18161）" || bad "空域名重问后没建好节点"
+has "$CFG" "^TLS_DOMAIN=menu.example$" && ok "重问后填域名建好节点（真 TLS menu.example）" || bad "重问后填域名建节点时 TLS 不对"
+[ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "选域名建节点后服务仍在运行" || bad "选域名建节点后服务停了"
 note "测试16：菜单第 10 项卸载（最后执行）"
 # 卸载前先摆好各种残留：菜单备份、LE 证书、hook、BBR 配置、服务备份、/tmp 备份。
 # 注意：此时节点域名是 menu.example（测试 15g），卸载只应删 menu.example 的证书，
@@ -543,6 +581,59 @@ grep -q "net.ipv4.tcp_congestion_control=cubic" "$TEST_ROOT/sysctl.log" && grep 
 [ ! -e /tmp/mmx-server.bak-board ] && [ ! -e /tmp/mmx-server.bak-domain ] && ok "卸载后 /tmp 里的 mmx 备份已删除" || bad "卸载后 /tmp 里的 mmx 备份还在"
 rm -f /tmp/mmx-server.bak-*
 grep -q "stop" "$TEST_ROOT/systemctl.log" && grep -q "disable" "$TEST_ROOT/systemctl.log" && ok "卸载时停用并禁用了服务" || bad "卸载时没停用服务"
+
+note "测试17：交互终端下装完进主菜单（pty 覆盖 MMX_TEST_ENTER_MENU=1）"
+# 用独立的干净根目录（全新安装、无配置），在 pty 下跑安装脚本：
+# stdin 是终端，装完应直接进主菜单（而不是打印提示退出）；喂 11 退出菜单。
+PTY_ROOT="$TEST_ROOT/pty"
+mkdir -p "$PTY_ROOT/stubs" "$PTY_ROOT/src"
+cp "$SRC_DIR/install-mm-x-server.sh" "$PTY_ROOT/src/"
+cp "$SRC_DIR/mmx-server-linux-amd64" "$PTY_ROOT/src/mmx-server-linux-amd64"
+cp "$STUB_BIN/systemctl" "$STUB_BIN/curl" "$STUB_BIN/ss" "$PTY_ROOT/stubs/"
+PTY_OUT="$(MMX_TEST_ROOT="$PTY_ROOT" python3 - "$PTY_ROOT" <<'PYEOF'
+import os, pty, sys, time, select, subprocess
+root = sys.argv[1]
+env = dict(os.environ)
+env["MMX_TEST_ROOT"] = root
+env["MMX_TEST_ENTER_MENU"] = "1"
+env["PATH"] = f"{root}/usr/local/bin:{root}/stubs:{os.environ['PATH']}"
+env["TERM"] = "xterm"
+master, slave = pty.openpty()
+p = subprocess.Popen(
+    ["bash", root + "/src/install-mm-x-server.sh", "--port", "18130"],
+    stdin=slave, stdout=slave, stderr=slave, env=env, close_fds=True)
+os.close(slave)
+out = b""
+deadline = time.time() + 30
+sent = False
+while time.time() < deadline:
+    r, _, _ = select.select([master], [], [], 1)
+    if r:
+        try: chunk = os.read(master, 4096)
+        except OSError: break
+        if not chunk: break
+        out += chunk
+        if (not sent) and "选一项".encode() in out:
+            os.write(master, b"11\n")
+            sent = True
+    if p.poll() is not None and not r:
+        break
+try: p.wait(timeout=10)
+except Exception: p.kill()
+try: os.close(master)
+except OSError: pass
+text = out.decode("utf-8", "replace")
+print("MENU_APPEARED" if "mm-x 服务端管理" in text else "MENU_MISSING")
+print("EXIT0" if p.returncode == 0 else "EXIT%s" % p.returncode)
+print("NO_NODE_MSG" if "只装程序，不建节点" in text else "NO_NODE_MSG_MISSING")
+print("NO_NODE_STATUS" if "服务：未运行" in text else "NO_NODE_STATUS_MISSING")
+PYEOF
+)"
+printf '%s' "$PTY_OUT" | grep -q "MENU_APPEARED" && ok "交互终端下装完进了主菜单" || bad "交互终端下装完没进主菜单"
+printf '%s' "$PTY_OUT" | grep -q "EXIT0" && ok "菜单里选 11 退出，退出码 0" || bad "菜单退出码不对"
+printf '%s' "$PTY_OUT" | grep -q "NO_NODE_MSG" && ok "pty 下全新安装仍提示只装程序、不建节点" || bad "pty 下全新安装提示不对"
+printf '%s' "$PTY_OUT" | grep -q "NO_NODE_STATUS" && ok "菜单里显示服务未运行（没节点）" || bad "菜单里没显示服务未运行"
+[ ! -e "$PTY_ROOT/etc/mmx/config" ] && ok "pty 下全新安装没写配置文件" || bad "pty 下全新安装写了配置文件"
 
 echo ""
 echo "================ 结果汇总 ================"
