@@ -12,8 +12,8 @@
 # 先停掉占用的服务或传 --port 换端口）、不限速（rate=0；想限速再传 --rate，例如 6250K = 50 Mbps）、突发 0（严格模式：限速时任何时候都不超过限速；旧默认 15M 会让每条新连接开头先冲 15MB 再限速，实测 30MB 文件平均跑到 96 Mbps、峰值 1300 Mbps，等于没限——YouTube 这种多连接、分段取数据的流量，每段都落在突发里，更是全程不限）。
 # 脚本会：装二进制到 /usr/local/bin/mmx-server；生成/保留 /etc/mmx/psk（重装不换密钥，
 #   旧密钥靠服务端的 24 小时宽限期继续用）；默认开 BBR（开不了只警告）；放行防火墙端口；
-#   写 /etc/mmx/config（全部参数都在这里，菜单改参数就改这个文件）；写 systemd 服务
-#   （开机自启、崩溃自动重启）；装管理菜单 /usr/local/bin/mmx（输入 mmx 呼出）。
+#   写 /etc/mmx/config（全部参数都在这里，菜单改参数就改这个文件）；写服务文件
+#   （systemd 用单元文件，OpenRC/Alpine 用 /etc/init.d/mmx-server；开机自启、崩溃自动重启）；装管理菜单 /usr/local/bin/mmx（输入 mmx 呼出）。
 # 安装完不打印 mmx:// 链接——链接在 mm 菜单第 5 项里看。
 # 再跑一次本脚本：默认只更新程序文件（服务端二进制、管理菜单、服务文件），
 # 节点配置（端口/密钥/TLS/流量设置）原样保留，不会重置；彻底重装节点（换端口/
@@ -21,7 +21,7 @@
 set -euo pipefail
 
 # 测试钩子：MMX_TEST_ROOT 设置时，所有路径都改到该目录下（不碰真实系统），
-# BBR 步骤跳过；systemctl/journalctl/ss 由测试替身提供。生产环境不要设置这个变量。
+# BBR 步骤跳过；systemctl/rc-service/journalctl/ss 由测试替身提供。生产环境不要设置这个变量。
 ROOT="${MMX_TEST_ROOT:-}"
 CFG_DIR="$ROOT/etc/mmx"
 CFG_FILE="$CFG_DIR/config"
@@ -29,6 +29,68 @@ PSK_FILE="$CFG_DIR/psk"
 BIN_DIR="$ROOT/usr/local/bin"
 UNIT_DIR="$ROOT/etc/systemd/system"
 UNIT_FILE="$UNIT_DIR/mmx-server.service"
+INIT_DIR="$ROOT/etc/init.d"
+INIT_FILE="$INIT_DIR/mmx-server"
+
+# 服务管理方式：systemd（Debian/Ubuntu）或 OpenRC（Alpine）。
+# 有 systemctl 用 systemd；没有 systemctl 但有 rc-service 用 OpenRC；
+# 都没有就警告并默认 systemd（Debian 行为不变）。
+# （测试模式下替身只提供 systemctl，所以走 systemd，和原来一样。）
+# 注意：下面这组检测 + 服务操作函数在部署脚本和菜单脚本里各有一份（菜单是独立脚本），改动时两边同步。
+detect_init() {
+  if command -v systemctl >/dev/null 2>&1; then echo "systemd"; return 0; fi
+  if command -v rc-service >/dev/null 2>&1; then echo "openrc"; return 0; fi
+  echo "警告：没找到 systemctl 也没找到 rc-service，默认按 systemd 处理" >&2
+  echo "systemd"
+}
+INIT_SYS="$(detect_init)"
+# 当前系统实际用的服务文件（systemd 用 UNIT_FILE，OpenRC 用 INIT_FILE）
+if [ "$INIT_SYS" = "openrc" ]; then SVC_FILE="$INIT_FILE"; SVC_DIR="$INIT_DIR"; else SVC_FILE="$UNIT_FILE"; SVC_DIR="$UNIT_DIR"; fi
+
+# 服务操作封装：按 INIT_SYS 分发到 systemctl 或 rc-service/rc-update。
+# 返回值和原来直接调 systemctl 时一致（成功 0，失败非 0），方便 if 判断。
+svc_reload() {
+  if [ "$INIT_SYS" = "openrc" ]; then return 0; fi
+  systemctl daemon-reload 2>/dev/null
+}
+svc_restart() {
+  if [ "$INIT_SYS" = "openrc" ]; then rc-service mmx-server restart 2>/dev/null; else systemctl restart mmx-server 2>/dev/null; fi
+}
+svc_is_active() {
+  if [ "$INIT_SYS" = "openrc" ]; then rc-service mmx-server status >/dev/null 2>&1; else systemctl is-active --quiet mmx-server 2>/dev/null; fi
+}
+svc_start() {
+  if [ "$INIT_SYS" = "openrc" ]; then rc-service mmx-server start 2>/dev/null; else systemctl start mmx-server 2>/dev/null; fi
+}
+svc_stop() {
+  if [ "$INIT_SYS" = "openrc" ]; then rc-service mmx-server stop 2>/dev/null; else systemctl stop mmx-server 2>/dev/null; fi
+}
+svc_status() {
+  if [ "$INIT_SYS" = "openrc" ]; then rc-service mmx-server status 2>&1 | head -20 || true; else systemctl status mmx-server --no-pager 2>&1 | head -20 || true; fi
+}
+svc_enable() {
+  if [ "$INIT_SYS" = "openrc" ]; then rc-update add mmx-server default 2>/dev/null; else systemctl enable mmx-server >/dev/null 2>&1; fi
+}
+svc_disable() {
+  if [ "$INIT_SYS" = "openrc" ]; then rc-update del mmx-server default 2>/dev/null; else systemctl disable mmx-server 2>/dev/null; fi
+}
+# 提示文字里用的服务命令（按当前系统显示正确那条）
+svc_status_cmd() {
+  if [ "$INIT_SYS" = "openrc" ]; then echo "rc-service mmx-server status"; else echo "systemctl status mmx-server"; fi
+}
+svc_log_cmd() {
+  if [ "$INIT_SYS" = "openrc" ]; then echo "tail -n 50 /var/log/messages"; else echo "journalctl -u mmx-server -n 50"; fi
+}
+svc_log_follow_cmd() {
+  if [ "$INIT_SYS" = "openrc" ]; then echo "tail -f /var/log/messages"; else echo "journalctl -u mmx-server -f"; fi
+}
+svc_stop_cmd() {
+  if [ "$INIT_SYS" = "openrc" ]; then echo "rc-service $1 stop"; else echo "systemctl stop $1"; fi
+}
+# 装 certbot 的命令（提示文字用）
+certbot_install_cmd() {
+  if [ "$INIT_SYS" = "openrc" ]; then echo "apk add certbot"; else echo "apt install certbot -y"; fi
+}
 
 PORT=""
 REINSTALL="0" # --reinstall 传过就置 1（彻底重装节点）；不传时已安装就只更新程序文件
@@ -100,7 +162,7 @@ valid_domain() {
 usage() {
   echo "用法：sudo $0 [--port 端口] [--rate 限速] [--burst 突发] [--name 节点名] [--host 公网IP或域名] [--bin 服务端二进制路径] [--whitelist-ip 中转机IP] [--whitelist-file 白名单文件] [--fallback site|silent] [--tls-domain 域名 --tls-cert 证书 --tls-key 私钥] [--preset gcp|cdt] [--domain 域名] [--reinstall]"
   echo "  --port   监听端口，默认 443（更像正常 HTTPS；不要用一眼能猜到的端口）"
-  echo "           443 被占时本脚本会直接报错停下，先停掉占用的服务（例如 systemctl stop nginx）或换个端口再装"
+  echo "           443 被占时本脚本会直接报错停下，先停掉占用的服务（例如 $(svc_stop_cmd nginx)）或换个端口再装"
   echo "  --reinstall 彻底重装节点：按本次传入参数重写 /etc/mmx/config（端口/限速/TLS/流量设置都会重置；"
   echo "           密钥文件保留不变）。不加时：已安装就只更新程序文件（服务端二进制、管理菜单、服务文件），"
   echo "           节点配置原样保留，再跑一遍也不会把服务重置掉"
@@ -124,7 +186,7 @@ usage() {
   echo "                   DNS 必须先指到这台 VPS；要和 --tls-cert/--tls-key 一起给"
   echo "  --tls-cert       真 TLS 模式的证书文件（fullchain.pem）"
   echo "  --tls-key        真 TLS 模式的私钥文件（privkey.pem）"
-  echo "                   没有证书时先申请 Let's Encrypt：apt install certbot -y && certbot certonly --standalone -d 你的域名"
+  echo "                   没有证书时先申请 Let's Encrypt：$(certbot_install_cmd) && certbot certonly --standalone -d 你的域名"
   echo "                   （证书一般在 /etc/letsencrypt/live/你的域名/fullchain.pem 和 privkey.pem）"
   echo "  --tls-auto       自签 TLS 模式（没域名时用）：首次启动自动生成自签证书并存到 /etc/mmx/tls-cert.pem 和"
   echo "                   /etc/mmx/tls-key.pem；客户端靠 mmx:// 链接里的 pin（SPKI 指纹）锁定验证，不跳过验证。"
@@ -443,7 +505,9 @@ fi
 if [ -z "$HOST" ]; then
   HOST="$(curl -s --max-time 5 https://checkip.amazonaws.com 2>/dev/null || true)"
   if [ -z "$HOST" ]; then HOST="$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null || true)"; fi
-  if [ -z "$HOST" ]; then HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"; fi
+  # BusyBox hostname（Alpine）没有 -I 选项，会直接报错退出 1；
+  # set -euo pipefail 下必须加 || true，否则安装会在这里中断（Debian 的 hostname -I 正常，不受影响）。
+  if [ -z "$HOST" ]; then HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"; fi
 fi
 # 127.0.0.1/内网 IP 不能当链接地址（hostname -I 有时先返回它）；
 # 探到这种地址就当没探到，菜单里用占位地址提醒用户改。
@@ -456,7 +520,7 @@ if [ -z "$HOST" ]; then
 fi
 
 # 7) 写配置文件 /etc/mmx/config：全部参数都在这里，菜单改参数就改这个文件，
-#    再由菜单按它重新生成 systemd 服务（改错了重启失败会自动回滚）。
+#    再由菜单按它重新生成服务文件（改错了重启失败会自动回滚）。
 #    只在全新安装或 --reinstall 时写；已安装更新模式跳过，节点配置原样保留。
 if [ "$UPDATE_ONLY" = "0" ]; then
 WHITELIST_IPS_STR="${WHITELIST_IPS[*]:-}"
@@ -472,7 +536,7 @@ fi
 
 # 8) 写管理菜单 /usr/local/bin/mmx：输入 mmx 呼出。
 #    菜单是一个独立的 bash 脚本；配置存在 /etc/mmx/config，密钥在 /etc/mmx/psk，
-#    systemd 服务由菜单按配置文件生成（改参数后自动重载 + 重启，重启失败自动回滚）。
+#    服务文件由菜单按配置文件生成（改参数后自动重载 + 重启，重启失败自动回滚）。
 echo "== 安装管理菜单 =="
 cat > "$BIN_DIR/mmx" <<'MM_MENU_EOF'
 #!/bin/bash
@@ -482,7 +546,7 @@ cat > "$BIN_DIR/mmx" <<'MM_MENU_EOF'
 #       9 查看日志  10 卸载  11 退出
 # （更换密钥、诱饵回退 / TLS 设置已从主菜单移除，函数保留在脚本内；TLS 入口在第 3 项编辑节点第 10 子项）
 # 全部配置存在 /etc/mmx/config，密钥在 /etc/mmx/psk；
-# systemd 服务由本脚本按配置文件生成，改参数后自动重载 + 重启，
+# 服务文件由本脚本按配置文件生成，改参数后自动重载 + 重启，
 # 重启失败自动回滚到改之前的配置，不会让服务起不来。
 # 隐藏用法（给部署脚本和脚本调用）：mmx --write-service（按配置写服务文件）、mmx --show-link [plain|opaque]（只打印链接，
 # 默认 opaque 不透明链接；plain 是短格式，只在显式指定时用）、
@@ -500,6 +564,68 @@ SERVER_BIN="$BIN_DIR/mmx-server"
 UNIT_DIR="$ROOT/etc/systemd/system"
 UNIT_FILE="$UNIT_DIR/mmx-server.service"
 MYNAME="$(basename "$0")"
+
+# 服务管理方式：systemd（Debian/Ubuntu）或 OpenRC（Alpine）。
+# 有 systemctl 用 systemd；没有 systemctl 但有 rc-service 用 OpenRC；
+# 都没有就警告并默认 systemd（Debian 行为不变）。
+# （测试模式下替身只提供 systemctl，所以走 systemd，和原来一样。）
+# 注意：下面这组检测 + 服务操作函数在部署脚本和菜单脚本里各有一份（菜单是独立脚本），改动时两边同步。
+detect_init() {
+  if command -v systemctl >/dev/null 2>&1; then echo "systemd"; return 0; fi
+  if command -v rc-service >/dev/null 2>&1; then echo "openrc"; return 0; fi
+  echo "警告：没找到 systemctl 也没找到 rc-service，默认按 systemd 处理" >&2
+  echo "systemd"
+}
+INIT_SYS="$(detect_init)"
+INIT_DIR="$ROOT/etc/init.d"
+INIT_FILE="$INIT_DIR/mmx-server"
+# 当前系统实际用的服务文件（systemd 用 UNIT_FILE，OpenRC 用 INIT_FILE）
+if [ "$INIT_SYS" = "openrc" ]; then SVC_FILE="$INIT_FILE"; SVC_DIR="$INIT_DIR"; else SVC_FILE="$UNIT_FILE"; SVC_DIR="$UNIT_DIR"; fi
+
+# 服务操作封装：按 INIT_SYS 分发到 systemctl 或 rc-service/rc-update。
+# 返回值和原来直接调 systemctl 时一致（成功 0，失败非 0），方便 if 判断。
+svc_reload() {
+  if [ "$INIT_SYS" = "openrc" ]; then return 0; fi
+  systemctl daemon-reload 2>/dev/null
+}
+svc_restart() {
+  if [ "$INIT_SYS" = "openrc" ]; then rc-service mmx-server restart 2>/dev/null; else systemctl restart mmx-server 2>/dev/null; fi
+}
+svc_is_active() {
+  if [ "$INIT_SYS" = "openrc" ]; then rc-service mmx-server status >/dev/null 2>&1; else systemctl is-active --quiet mmx-server 2>/dev/null; fi
+}
+svc_start() {
+  if [ "$INIT_SYS" = "openrc" ]; then rc-service mmx-server start 2>/dev/null; else systemctl start mmx-server 2>/dev/null; fi
+}
+svc_stop() {
+  if [ "$INIT_SYS" = "openrc" ]; then rc-service mmx-server stop 2>/dev/null; else systemctl stop mmx-server 2>/dev/null; fi
+}
+svc_status() {
+  if [ "$INIT_SYS" = "openrc" ]; then rc-service mmx-server status 2>&1 | head -20 || true; else systemctl status mmx-server --no-pager 2>&1 | head -20 || true; fi
+}
+svc_enable() {
+  if [ "$INIT_SYS" = "openrc" ]; then rc-update add mmx-server default 2>/dev/null; else systemctl enable mmx-server >/dev/null 2>&1; fi
+}
+svc_disable() {
+  if [ "$INIT_SYS" = "openrc" ]; then rc-update del mmx-server default 2>/dev/null; else systemctl disable mmx-server 2>/dev/null; fi
+}
+# 提示文字里用的服务命令（按当前系统显示正确那条）
+svc_status_cmd() {
+  if [ "$INIT_SYS" = "openrc" ]; then echo "rc-service mmx-server status"; else echo "systemctl status mmx-server"; fi
+}
+svc_log_cmd() {
+  if [ "$INIT_SYS" = "openrc" ]; then echo "tail -n 50 /var/log/messages"; else echo "journalctl -u mmx-server -n 50"; fi
+}
+svc_log_follow_cmd() {
+  if [ "$INIT_SYS" = "openrc" ]; then echo "tail -f /var/log/messages"; else echo "journalctl -u mmx-server -f"; fi
+}
+svc_stop_cmd() {
+  if [ "$INIT_SYS" = "openrc" ]; then echo "rc-service $1 stop"; else echo "systemctl stop $1"; fi
+}
+# 装 certbot 的命令（提示文字用）
+certbot_install_cmd() {
+  if [ "$INIT_SYS" = "openrc" ]; then echo "apk add certbot"; else echo "apt install certbot -y"; fi
+}
 
 # 默认值（配置文件缺失时用；老配置没有流量字段时也按这些默认走）
 PORT=""; RATE="0"; BURST="0"; NAME="mm-x"; HOST=""
@@ -529,7 +655,9 @@ save_config() {
   chmod 600 "$CFG_FILE"
 }
 
-# 按当前配置写 systemd 服务文件（不重载、不重启，只写文件）
+# 按当前配置写服务文件（不重载、不重启，只写文件）：
+# systemd 写 $UNIT_FILE（单元文件），OpenRC 写 $INIT_FILE（init 脚本）。
+# 启动参数只拼一次，两边用同一份（字节一致）；OpenRC 的 command_args 经 eval 处理，引号正常解析。
 write_service() {
   local tls_args="" wl_args="" al_args="" traffic_args="" ip e
   if [ -n "$TLS_DOMAIN" ]; then
@@ -552,6 +680,32 @@ write_service() {
   # 目标域名白名单：只在开了时写进启动参数（默认关，不写）。
   local domain_whitelist_args=""
   if [ -n "${DOMAIN_WHITELIST:-}" ]; then domain_whitelist_args=" --domain-whitelist $DOMAIN_WHITELIST"; fi
+  # 启动参数（不含二进制路径）：systemd 的 ExecStart 和 OpenRC 的 command_args 用同一份。
+  local args="--psk-file $PSK_FILE --listen 0.0.0.0:$PORT --rate $RATE --burst $BURST --name \"$NAME\" --fallback $FALLBACK$tls_args$wl_args$al_args$traffic_args$cover_args$domain_whitelist_args"
+  if [ "$INIT_SYS" = "openrc" ]; then
+    mkdir -p "$INIT_DIR"
+    # command_args 写进双引号里，里面的特殊字符要转义；openrc-run 用 eval 处理 command_args，转义后正常解析。
+    # 先转义反斜杠，再转义双引号、$ 和反引号（顺序不能乱）。
+    local esc_args="$args"
+    esc_args="${esc_args//\\/\\\\}"
+    esc_args="${esc_args//\"/\\\"}"
+    esc_args="${esc_args//\$/\\\$}"
+    esc_args="${esc_args//\`/\\\`}"
+    cat > "$INIT_FILE" <<OPENRC_EOF
+#!/sbin/openrc-run
+# mm-x private proxy server
+command="$SERVER_BIN"
+command_args="$esc_args"
+command_background=true
+pidfile="/run/mmx-server.pid"
+depend() {
+  need net
+  after firewall
+}
+OPENRC_EOF
+    chmod +x "$INIT_FILE"
+    return 0
+  fi
   mkdir -p "$UNIT_DIR"
   cat > "$UNIT_FILE" <<UNIT_EOF
 [Unit]
@@ -564,7 +718,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=$SERVER_BIN --psk-file $PSK_FILE --listen 0.0.0.0:$PORT --rate $RATE --burst $BURST --name "$NAME" --fallback $FALLBACK$tls_args$wl_args$al_args$traffic_args$cover_args$domain_whitelist_args
+ExecStart=$SERVER_BIN $args
 Restart=always
 RestartSec=5
 # 密钥文件只让 root 读，服务以 root 跑（只监听一个端口，不写别的目录）
@@ -580,25 +734,25 @@ UNIT_EOF
 apply_config() {
   local desc="$1"
   cp -f "$CFG_FILE" "$CFG_FILE.bak" 2>/dev/null || true
-  cp -f "$UNIT_FILE" "$UNIT_FILE.bak" 2>/dev/null || true
+  cp -f "$SVC_FILE" "$SVC_FILE.bak" 2>/dev/null || true
   save_config
   write_service
-  systemctl daemon-reload 2>/dev/null || true
-  if systemctl restart mmx-server 2>/dev/null && systemctl is-active --quiet mmx-server 2>/dev/null; then
-    rm -f "$CFG_FILE.bak" "$UNIT_FILE.bak"
+  svc_reload || true
+  if svc_restart && svc_is_active; then
+    rm -f "$CFG_FILE.bak" "$SVC_FILE.bak"
     echo "已生效：$desc，服务已重启并正常运行"
     return 0
   fi
   echo "重启失败！正在回滚到改之前的配置……"
   cp -f "$CFG_FILE.bak" "$CFG_FILE" 2>/dev/null || true
-  cp -f "$UNIT_FILE.bak" "$UNIT_FILE" 2>/dev/null || true
+  cp -f "$SVC_FILE.bak" "$SVC_FILE" 2>/dev/null || true
   load_config
-  systemctl daemon-reload 2>/dev/null || true
-  systemctl restart mmx-server 2>/dev/null || true
-  if systemctl is-active --quiet mmx-server 2>/dev/null; then
+  svc_reload || true
+  svc_restart || true
+  if svc_is_active; then
     echo "已回滚：服务用原配置恢复运行。请检查输入的参数再改。"
   else
-    echo "回滚后服务仍未运行！请手动检查：systemctl status mmx-server；日志：journalctl -u mmx-server -n 50"
+    echo "回滚后服务仍未运行！请手动检查：$(svc_status_cmd)；日志：$(svc_log_cmd)"
   fi
   return 1
 }
@@ -687,7 +841,7 @@ build_link() {
     if command -v openssl >/dev/null 2>&1; then openssl rand -hex 32 > "$PSK_FILE";
     else od -An -tx1 -N 32 /dev/urandom | tr -d ' \n' > "$PSK_FILE"; fi
     chmod 600 "$PSK_FILE"
-    systemctl restart mmx-server 2>/dev/null || true
+    svc_restart || true
   fi
   local psk link
   psk="$(cat "$PSK_FILE")"
@@ -785,12 +939,12 @@ show_pin() {
 # 6) 服务状态
 show_status() {
   load_config
-  if systemctl is-active --quiet mmx-server 2>/dev/null; then
+  if svc_is_active; then
     echo "服务状态：正在运行"
   else
     echo "服务状态：未运行（用第 7 项重启，或看第 9 项日志找原因）"
   fi
-  systemctl status mmx-server --no-pager 2>&1 | head -20 || true
+  svc_status
   if command -v ss >/dev/null 2>&1 && [ -n "$PORT" ]; then
     if port_in_use "$PORT"; then echo "端口 $PORT 正在监听"; else echo "端口 $PORT 没在监听"; fi
   fi
@@ -798,10 +952,10 @@ show_status() {
 
 # 7) 重启服务
 restart_svc() {
-  if systemctl restart mmx-server 2>/dev/null && systemctl is-active --quiet mmx-server 2>/dev/null; then
+  if svc_restart && svc_is_active; then
     echo "重启成功，服务正在运行"
   else
-    echo "重启失败！请看第 9 项日志：journalctl -u mmx-server -n 50"
+    echo "重启失败！请看第 9 项日志：$(svc_log_cmd)"
     return 1
   fi
 }
@@ -846,7 +1000,7 @@ show_logs() {
   if command -v journalctl >/dev/null 2>&1; then
     journalctl -u mmx-server -n 50 --no-pager 2>&1 || echo "读日志失败"
   else
-    echo "没有 journalctl，请直接看：systemctl status mmx-server"
+    echo "没有 journalctl，请直接看：$(svc_status_cmd)"
   fi
 }
 
@@ -960,12 +1114,12 @@ traffic_menu() {
         echo "要清零本周期已统计的流量（计数从 0 重新开始），限额和设置不变。"
         read -r -p "确认清零吗？输入 y 确认： " yn || continue
         case "$yn" in y|Y) ;; *) echo "已取消。"; pause; continue;; esac
-        systemctl stop mmx-server 2>/dev/null || true
+        svc_stop || true
         rm -f "$CFG_DIR/traffic.json"
-        if systemctl restart mmx-server 2>/dev/null && systemctl is-active --quiet mmx-server 2>/dev/null; then
+        if svc_restart && svc_is_active; then
           echo "已清零：本周期流量从 0 重新开始统计"
         else
-          echo "清零后服务没起来！请看日志：journalctl -u mmx-server -n 50"
+          echo "清零后服务没起来！请看日志：$(svc_log_cmd)"
         fi
         ;;
       0|"") return 0 ;;
@@ -1121,18 +1275,28 @@ setup_domain() {
   # certbot standalone 要占 80 端口做校验
   if port_in_use 80; then
     echo "80 端口已被别的服务占用，certbot standalone 校验需要 80 端口。"
-    echo "请先停掉占用 80 端口的服务（例如 systemctl stop nginx），再试。"
+    echo "请先停掉占用 80 端口的服务（例如 $(svc_stop_cmd nginx)），再试。"
     return 1
   fi
-  # 装 certbot（没有就装；测试模式下用替身，不调 apt）
+  # 装 certbot（没有就装；测试模式下如果包管理器也没替身，才直接返回，不调真包管理器）
   if ! command -v certbot >/dev/null 2>&1; then
-    if [ -n "${MMX_TEST_ROOT:-}" ]; then
+    if [ -n "${MMX_TEST_ROOT:-}" ] && ! command -v apt-get >/dev/null 2>&1 && ! command -v apk >/dev/null 2>&1; then
       echo "测试模式：没有 certbot（也没有替身），装不了证书。"
       return 1
     fi
     echo "正在安装 certbot……"
-    if ! (apt-get update -qq && apt-get install -y -qq certbot) >/dev/null 2>&1; then
-      echo "certbot 安装失败，请手动安装：apt install certbot -y"
+    if command -v apt-get >/dev/null 2>&1; then
+      if ! (apt-get update -qq && apt-get install -y -qq certbot) >/dev/null 2>&1; then
+        echo "certbot 安装失败，请手动安装：apt install certbot -y"
+        return 1
+      fi
+    elif command -v apk >/dev/null 2>&1; then
+      if ! apk add --no-cache certbot >/dev/null 2>&1; then
+        echo "certbot 安装失败，请手动安装：apk add certbot"
+        return 1
+      fi
+    else
+      echo "certbot 没装，也没找到 apt-get 或 apk，请手动安装：apt install certbot -y（Debian/Ubuntu）或 apk add certbot（Alpine）"
       return 1
     fi
   fi
@@ -1167,10 +1331,12 @@ setup_domain() {
   # 续期后重启服务，让它加载新证书（密钥复用，pin 不变，链接不用重印）
   local hook_dir="$le_dir/renewal-hooks/deploy"
   mkdir -p "$hook_dir"
-  cat > "$hook_dir/restart-mmx-server.sh" <<'HOOK_EOF'
+  local hook_cmd
+  if [ "$INIT_SYS" = "openrc" ]; then hook_cmd="rc-service mmx-server restart"; else hook_cmd="systemctl restart mmx-server"; fi
+  cat > "$hook_dir/restart-mmx-server.sh" <<HOOK_EOF
 #!/bin/bash
 # certbot 续期后重启 mmx-server，让它加载新证书（密钥复用，pin 不变）。
-systemctl restart mmx-server
+$hook_cmd
 HOOK_EOF
   chmod +x "$hook_dir/restart-mmx-server.sh"
   # 切真 TLS（apply_config：备份 → 写配置 → 写服务 → 重启，失败自动回滚）
@@ -1229,7 +1395,7 @@ tls_menu() {
         if [ ! -f "$cert" ]; then
           echo "证书文件不存在：$cert"
           echo "没有证书时先申请 Let's Encrypt（域名 DNS 必须先指到这台 VPS）："
-          echo "  apt install certbot -y && certbot certonly --standalone -d $dom"
+          echo "  $(certbot_install_cmd) && certbot certonly --standalone -d $dom"
           echo "证书一般在 /etc/letsencrypt/live/$dom/fullchain.pem 和 privkey.pem，拿到后再回来填这两个路径。"
           pause; continue
         fi
@@ -1296,7 +1462,7 @@ add_node() {
   done
   if [ "$np" != "${PORT:-}" ] && port_in_use "$np"; then
     echo "端口 $np 已被别的服务占用！"
-    if [ "$np" = "443" ]; then echo "443 常见占用：nginx / Apache / 其他 Web 服务，先停掉它（systemctl stop nginx）再添加。"; fi
+    if [ "$np" = "443" ]; then echo "443 常见占用：nginx / Apache / 其他 Web 服务，先停掉它（$(svc_stop_cmd nginx)）再添加。"; fi
     local yn2
     read -r -p "仍要用 $np 吗？（服务可能起不来，失败会自动回滚）[y/N] " yn2 || return 0
     case "$yn2" in y|Y) ;; *) echo "已取消。"; return 0;; esac
@@ -1392,7 +1558,7 @@ edit_params() {
         valid_port "$np" || { echo "端口不合法：$np，应为 1-65535 之间的数字"; pause; continue; }
         if [ "$np" != "$PORT" ] && port_in_use "$np"; then
           echo "端口 $np 已被别的服务占用！"
-          if [ "$np" = "443" ]; then echo "443 常见占用：nginx / Apache / 其他 Web 服务，先停掉它（systemctl stop nginx）再改。"; fi
+          if [ "$np" = "443" ]; then echo "443 常见占用：nginx / Apache / 其他 Web 服务，先停掉它（$(svc_stop_cmd nginx)）再改。"; fi
           local yn
           read -r -p "仍要改成 $np 吗？（服务可能起不来，失败会自动回滚）[y/N] " yn || continue
           case "$yn" in y|Y) ;; *) echo "没改。"; pause; continue;; esac
@@ -1520,7 +1686,7 @@ delete_node() {
   local yn
   read -r -p "确认删除吗？输入 y 确认： " yn || return 0
   case "$yn" in y|Y) ;; *) echo "已取消。"; return 0;; esac
-  systemctl stop mmx-server 2>/dev/null || true
+  svc_stop || true
   rm -f "$CFG_FILE" "$PSK_FILE" "$CFG_DIR/traffic.json"
   echo "节点已删除。"
 }
@@ -1538,7 +1704,7 @@ uninstall() {
   echo "  服务 mmx-server（停用并删除服务文件）"
   echo "  程序 $SERVER_BIN、菜单命令 $BIN_DIR/mmx 和 $BIN_DIR/mm"
   echo "  配置 $CFG_DIR（含密钥、流量统计）"
-  echo "  备份：$BIN_DIR/mmx.bak-preset、$BIN_DIR/mmx*.bak、$BIN_DIR/mm.bak、$UNIT_FILE.bak、/tmp/mmx-server.bak-*"
+  echo "  备份：$BIN_DIR/mmx.bak-preset、$BIN_DIR/mmx*.bak、$BIN_DIR/mm.bak、$SVC_FILE.bak、/tmp/mmx-server.bak-*"
   if [ -n "$TLS_DOMAIN" ]; then
     echo "  Let's Encrypt 证书（仅域名 $TLS_DOMAIN）：$le_dir/live/$TLS_DOMAIN、$le_dir/archive/$TLS_DOMAIN、$le_dir/renewal/$TLS_DOMAIN.conf"
     echo "  续期 hook：$le_dir/renewal-hooks/deploy/restart-mmx-server.sh"
@@ -1550,10 +1716,10 @@ uninstall() {
   local yn
   read -r -p "确认卸载吗？输入 y 确认： " yn || return 0
   case "$yn" in y|Y) ;; *) echo "已取消。"; return 0;; esac
-  systemctl stop mmx-server 2>/dev/null || true
-  systemctl disable mmx-server 2>/dev/null || true
-  rm -f "$UNIT_FILE" "$UNIT_FILE.bak"
-  systemctl daemon-reload 2>/dev/null || true
+  svc_stop || true
+  svc_disable || true
+  rm -f "$SVC_FILE" "$SVC_FILE.bak"
+  svc_reload || true
   if command -v ufw >/dev/null 2>&1 && [ -n "$PORT" ]; then ufw delete allow "$PORT/tcp" >/dev/null 2>&1 || true; fi
   rm -f "$SERVER_BIN" "$BIN_DIR/mmx" "$BIN_DIR/mm"
   rm -f "$BIN_DIR/mmx.bak-preset" "$BIN_DIR"/mmx*.bak "$BIN_DIR"/mm.bak
@@ -1597,7 +1763,7 @@ main() {
     local tls_desc="关"
     [ -n "$TLS_DOMAIN" ] && tls_desc="真 TLS（$TLS_DOMAIN）"
     [ "${TLS_AUTO:-0}" = "1" ] && tls_desc="自签 TLS（SNI ${TLS_SNI:-www.microsoft.com}）"
-    if systemctl is-active --quiet mmx-server 2>/dev/null; then
+    if svc_is_active; then
       echo "服务：正在运行　端口：${PORT:-?}　限速：${RATE:-?}　突发：${BURST:-?}"
       echo "回退：${FALLBACK:-?}　TLS：$tls_desc"
     else
@@ -1642,15 +1808,16 @@ chmod +x "$BIN_DIR/mmx"
 ln -sf "$BIN_DIR/mmx" "$BIN_DIR/mm"
 echo "管理菜单已安装：$BIN_DIR/mmx（输入 mmx 呼出，旧的 mm 也能用）"
 
-# 9) systemd 服务：按配置文件生成（菜单改参数也是同一份逻辑），开机自启、崩溃自动重启
-echo "== 写入 systemd 服务 =="
+# 9) 服务文件：按配置文件生成（菜单改参数也是同一份逻辑），开机自启、崩溃自动重启
+#    systemd 写单元文件，OpenRC 写 /etc/init.d/mmx-server。
+echo "== 写入服务文件 =="
 "$BIN_DIR/mmx" --write-service
-mkdir -p "$UNIT_DIR"
-systemctl daemon-reload
-systemctl enable mmx-server >/dev/null 2>&1
-systemctl restart mmx-server
+mkdir -p "$SVC_DIR"
+svc_reload
+svc_enable
+svc_restart
 sleep 2
-if systemctl is-active --quiet mmx-server; then
+if svc_is_active; then
   echo "服务已启动：mmx-server 正在运行"
   # 更新成功，备份的旧二进制可以删了
   [ -n "$BIN_BAK" ] && rm -f "$BIN_BAK"
@@ -1660,15 +1827,15 @@ else
     echo "新二进制启动失败，正在还原旧二进制……"
     cp -f "$BIN_BAK" "$BIN_DIR/mmx-server"
     rm -f "$BIN_BAK"
-    systemctl daemon-reload
-    systemctl restart mmx-server
+    svc_reload
+    svc_restart
     sleep 2
-    if systemctl is-active --quiet mmx-server; then
+    if svc_is_active; then
       echo "已还原旧二进制，服务用原配置恢复运行（本次更新没生效，请检查新二进制再更新）。"
       exit 0
     fi
   fi
-  echo "服务启动失败，请看日志：journalctl -u mmx-server -n 50"
+  echo "服务启动失败，请看日志：$(svc_log_cmd)"
   exit 1
 fi
 
@@ -1679,7 +1846,7 @@ echo "程序文件已更新（服务端二进制、管理菜单、服务文件�
 echo "端口：$PORT（不变）；限速：$RATE；TLS：$TLS_MODE_DESC；节点名：$NAME"
 echo "密钥文件：$PSK_FILE（未变）；配置文件：$CFG_FILE（未动）"
 echo "想改节点参数用 mmx 菜单；想彻底重装节点请加 --reinstall。"
-echo "服务状态：mm 菜单第 6 项，或 systemctl status mmx-server；日志：mm 菜单第 9 项，或 journalctl -u mmx-server -f"
+echo "服务状态：mm 菜单第 6 项，或 $(svc_status_cmd)；日志：mm 菜单第 9 项，或 $(svc_log_follow_cmd)"
 else
 echo ""
 echo "== 安装完成 =="
@@ -1693,7 +1860,7 @@ else
 fi
 echo "密钥文件：$PSK_FILE（重装不换密钥；换密钥请直接改此文件，服务端自动识别，24 小时内新旧密钥都能用）"
 echo "配置文件：$CFG_FILE（菜单改参数就改这个文件）"
-echo "服务状态：mm 菜单第 6 项，或 systemctl status mmx-server；日志：mm 菜单第 9 项，或 journalctl -u mmx-server -f"
+echo "服务状态：mm 菜单第 6 项，或 $(svc_status_cmd)；日志：mm 菜单第 9 项，或 $(svc_log_follow_cmd)"
 echo ""
 echo "输入 mmx 打开管理菜单，在菜单第 5 项查看节点（粘贴到 mm-x 客户端就能用，绝不要分享给第二个人）。"
 fi
