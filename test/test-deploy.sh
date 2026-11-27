@@ -20,6 +20,33 @@ bad()  { echo "[FAIL] $1"; fail=$((fail+1)); }
 note() { echo "--- $1"; }
 has()  { grep -q "$2" "$1"; }   # has 文件 正则
 
+# 解码不透明 mmx:// 链接，输出 "ver=<n> pin=<0|1>"（链接是二进制 blob，ver/pin 藏在里面，grep 不到明文）
+opaque_info() {
+  python3 - "$1" <<'PYEOF'
+import base64, binascii, sys
+link = sys.argv[1].strip()
+rest = link[6:] if link.startswith("mmx://") else link
+blob = base64.urlsafe_b64decode(rest + "=" * (-len(rest) % 4))
+body, want = blob[:-4], int.from_bytes(blob[-4:], "big")
+assert (binascii.crc32(body) & 0xffffffff) == want, "crc mismatch"
+off = 5 + 32  # magic(4)+blob 版本(1)+PSK(32)
+ht = blob[off]; off += 1
+if ht == 0x01: off += 4
+elif ht == 0x02: off += 16
+elif ht == 0x03:
+    ln = blob[off]; off += 1 + ln
+else: raise SystemExit("bad host type")
+off += 2  # 端口
+ver = blob[off]; off += 1
+off += 1  # obfs
+sf = blob[off]; off += 1
+if sf == 1:
+    ln = blob[off]; off += 1 + ln
+pf = blob[off]; off += 1
+print(f"ver={ver} pin={1 if pf == 1 else 0}")
+PYEOF
+}
+
 rm -rf "$TEST_ROOT"
 mkdir -p "$STUB_BIN" "$SRC_DIR"
 
@@ -169,7 +196,7 @@ bash "$SRC_DIR/install-mm-x-server.sh" --port 18130 --name 测试节点 < /dev/n
 DEPLOY_CODE=$?
 [ "$DEPLOY_CODE" = 0 ] && ok "部署脚本退出码 0" || bad "部署脚本退出码 $DEPLOY_CODE（见 deploy.log）"
 if grep -q "mmx://" "$TEST_ROOT/deploy.log"; then bad "部署输出里打印了 mmx:// 链接（应该只在菜单里看）"; else ok "部署输出里没有 mmx:// 链接"; fi
-grep -q "输入 mm 打开管理菜单" "$TEST_ROOT/deploy.log" && ok "部署完成提示让用户输入 mm 打开菜单" || bad "部署完成提示没提 mm 菜单"
+grep -q "输入 mmx 打开管理菜单" "$TEST_ROOT/deploy.log" && ok "部署完成提示让用户输入 mmx 打开菜单" || bad "部署完成提示没提 mmx 菜单"
 [ -x "$MM_BIN" ] && ok "/usr/local/bin/mm 存在且可执行" || bad "/usr/local/bin/mm 不存在或不可执行"
 grep -Fq "printf '\033[32m'" "$MM_BIN" && ok "菜单脚本含绿色 printf（交互菜单统一绿色）" || bad "菜单脚本没有绿色 printf"
 grep -Fq "trap 'printf \"\033[0m\"' EXIT" "$MM_BIN" && ok "菜单脚本含 EXIT 复位 trap（退出时恢复终端颜色）" || bad "菜单脚本没有 EXIT 复位 trap"
@@ -194,11 +221,14 @@ grep -q "restart" "$TEST_ROOT/systemctl.log" && ok "部署时调用了 systemctl
 #（老竞态：基线 68/2 的两处失败就是这么来的）。
 run_mm() { printf '%b' "$1" | "$MM_BIN" > "$TEST_ROOT/mm-out.txt" 2>&1; cat "$TEST_ROOT/mm-out.txt"; }
 
-note "测试2：菜单第 5 项显示链接"
+note "测试2：菜单第 5 项查看节点（默认只显示一条）"
 LINK_OUT="$(run_mm '5\n11\n')"
+printf '%s' "$LINK_OUT" | grep -q "查看节点" && ok "第 5 项标题是查看节点" || bad "第 5 项标题不对"
+printf '%s' "$LINK_OUT" | grep -Fq "1. 203.0.113.5" && ok "第 1 条地址是探测到的公网 IP" || bad "第 1 条地址不对"
 printf '%s' "$LINK_OUT" | grep -q "mmx://" && ok "菜单显示出 mmx:// 链接" || bad "菜单没显示链接"
-printf '%s' "$LINK_OUT" | grep -q "ver=5" && ok "链接是 ver=5（v5 默认）" || bad "链接版本不对"
-printf '%s' "$LINK_OUT" | grep -q "203.0.113.5" && ok "链接里的地址是探测到的公网 IP" || bad "链接地址不对"
+LINK1="$(printf '%s' "$LINK_OUT" | grep -o 'mmx://[A-Za-z0-9_-]*' | head -1)"
+printf '%s' "$(opaque_info "$LINK1")" | grep -q "ver=5" && ok "链接是 ver=5（v5 默认）" || bad "链接版本不对"
+! printf '%s' "$LINK_OUT" | grep -q "^2\. " && ok "默认只显示 1 条节点（IP 链接不显示）" || bad "默认就显示了第 2 条节点"
 ! printf '%s' "$LINK_OUT" | grep -q "rate=" && ok "短格式链接不带 rate（限速由服务端配置）" || bad "短格式链接不应带 rate"
 
 note "测试3：菜单第 6 项状态 / 第 7 项重启 / 第 9 项日志"
@@ -225,8 +255,21 @@ note "测试7：菜单第 3 项 → 第 10 子项开启真 TLS（自签名证书
 openssl req -x509 -newkey rsa:2048 -keyout "$TEST_ROOT/key.pem" -out "$TEST_ROOT/cert.pem" -days 1 -nodes -subj "/CN=test.example" -addext "subjectAltName=DNS:test.example" >/dev/null 2>&1
 run_mm "3\n10\n2\ntest.example\n$TEST_ROOT/cert.pem\n$TEST_ROOT/key.pem\n0\n0\n10\n" | grep -q "开启真 TLS" && ok "开启真 TLS 提示正常" || bad "开启真 TLS 提示不对"
 has "$CFG" "^TLS_DOMAIN=test.example$" && has "$UNIT" "\-\-tls-domain test.example" && ok "配置+服务文件都有 TLS 域名" || bad "TLS 域名没写进配置/服务"
-run_mm '5\n11\n' | grep -q "pin=" && ok "TLS 模式下链接带 pin（短格式，obfs=tls 为 ver=5 默认）" || bad "TLS 模式下链接没有 pin"
+TLS_OUT="$(run_mm '5\n11\n')"
+TLS_LINK="$(printf '%s' "$TLS_OUT" | grep -o 'mmx://[A-Za-z0-9_-]*' | head -1)"
+printf '%s' "$(opaque_info "$TLS_LINK")" | grep -q "pin=1" && ok "TLS 模式下链接带 pin（不透明格式，pin 藏在链接里）" || bad "TLS 模式下链接没有 pin"
 run_mm '5\n11\n' | grep -q "test.example" && ok "TLS 模式下链接地址是域名" || bad "TLS 模式下链接地址不是域名"
+run_mm '5\n11\n' | grep -Fq "1. test.example" && ok "第 5 项第 1 条地址是域名" || bad "第 5 项第 1 条地址不对"
+# IP 链接开关（第 3 项第 14 子项）：默认关（第 5 项只有 1 条）；打开后第 5 项多一条 IP 链接；再关掉恢复。
+run_mm '5\n11\n' | grep -q "^2\. " && bad "默认就显示了第 2 条 IP 链接" || ok "默认第 5 项只有 1 条（IP 链接不显示）"
+run_mm '3\n14\n0\n11\n' | grep -q "IP 链接改为 显示" && ok "第 14 子项打开 IP 链接提示正常" || bad "打开 IP 链接提示不对"
+has "$CFG" "^SHOW_IP_LINK=1$" && ok "配置里 IP 链接开关已是 1" || bad "配置里 IP 链接开关没打开"
+IP_OUT="$(run_mm '5\n11\n')"
+printf '%s' "$IP_OUT" | grep -Fq "2. 203.0.113.5" && ok "打开后第 5 项第 2 条是公网 IP" || bad "打开后第 5 项没有 IP 条目"
+[ "$(printf '%s' "$IP_OUT" | grep -c "mmx://")" = "2" ] && ok "打开后第 5 项有两条链接" || bad "打开后第 5 项链接数不对"
+run_mm '3\n14\n0\n11\n' | grep -q "IP 链接改为 不显示" && ok "第 14 子项关闭 IP 链接提示正常" || bad "关闭 IP 链接提示不对"
+has "$CFG" "^SHOW_IP_LINK=0$" && ok "配置里 IP 链接开关已是 0" || bad "配置里 IP 链接开关没关掉"
+run_mm '5\n11\n' | grep -q "^2\. " && bad "关掉后第 5 项还有第 2 条" || ok "关掉后第 5 项恢复只有 1 条"
 run_mm '3\n10\n3\n0\n0\n11\n' | grep -q "关闭真 TLS" && ok "关闭真 TLS 提示正常" || bad "关闭真 TLS 提示不对"
 grep -q "^TLS_DOMAIN=''$" "$CFG" && ! grep -q "tls-domain" "$UNIT" && ok "关闭后配置+服务文件里没了 TLS" || bad "关闭 TLS 后还有残留"
 
@@ -235,7 +278,9 @@ run_mm "3\n10\n4\n\n0\n0\n10\n" | grep -q "开启自签 TLS" && ok "开启自签
 has "$CFG" "^TLS_AUTO=1$" && has "$UNIT" "\\-\\-tls-auto" && ok "配置+服务文件都有 --tls-auto" || bad "自签 TLS 没写进配置/服务"
 has "$UNIT" "tls-cert.pem" && has "$UNIT" "tls-key.pem" && ok "服务文件里自签证书是绝对路径" || bad "自签证书路径不对"
 ! run_mm '5\n11\n' | grep -q "obfs=tls-fake" && ok "自签模式下链接不是明文（短格式，obfs=tls 为 ver=5 默认）" || bad "自签模式下链接不对"
-run_mm '5\n11\n' | grep -q "pin=" && ok "自签模式下链接带 pin" || bad "自签模式下链接没有 pin"
+SS_OUT="$(run_mm '5\n11\n')"
+SS_LINK="$(printf '%s' "$SS_OUT" | grep -o 'mmx://[A-Za-z0-9_-]*' | head -1)"
+printf '%s' "$(opaque_info "$SS_LINK")" | grep -q "pin=1" && ok "自签模式下链接带 pin" || bad "自签模式下链接没有 pin"
 run_mm '3\n10\n5\n0\n0\n11\n' | grep -Eq "[A-Za-z0-9_-]{43}" && ok "第 3 项 → 第 10 子项 → 第 5 子项能查到 43 位指纹" || bad "查指纹没拿到 pin"
 run_mm '3\n10\n3\n0\n0\n11\n' | grep -q "关闭自签 TLS" && ok "关闭自签 TLS 提示正常" || bad "关闭自签 TLS 提示不对"
 grep -q "^TLS_AUTO=0$" "$CFG" && ! grep -q "tls-auto" "$UNIT" && ok "关闭后配置+服务文件里没了自签 TLS" || bad "关闭自签 TLS 后还有残留"

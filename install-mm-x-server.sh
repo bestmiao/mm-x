@@ -478,7 +478,7 @@ cat > "$BIN_DIR/mmx" <<'MM_MENU_EOF'
 #!/bin/bash
 # mm-x 服务端管理菜单：在 VPS 上输入 mmx 呼出。
 # 功能：1 添加节点  2 载入预设（GCP / 阿里云CDT 的流量设置）  3 编辑节点（含流量设置、域名白名单）
-#       4 删除节点  5 查看协议  6 服务状态  7 重启服务  8 修改限速
+#       4 删除节点  5 查看节点  6 服务状态  7 重启服务  8 修改限速
 #       9 查看日志  10 卸载  11 退出
 # （更换密钥、诱饵回退 / TLS 设置已从主菜单移除，函数保留在脚本内；TLS 入口在第 3 项编辑节点第 10 子项）
 # 全部配置存在 /etc/mmx/config，密钥在 /etc/mmx/psk；
@@ -510,6 +510,9 @@ TRAFFIC_MODE="total"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
 TRAFFIC_LIMIT_MODE="throttle"; TRAFFIC_QUOTA="0"; TRAFFIC_THROTTLE_RATE="125K"
 COVER_TRAFFIC="low"
 DOMAIN_WHITELIST=""
+# 第 5 项查看节点里是否同时显示 IP 地址的链接（默认不显示，只显示域名/服务器地址那条）；
+# IP 链接是同一台服务器的 IP 写法，不是第二个独立节点，只有用户在编辑节点里打开才显示。
+SHOW_IP_LINK="0"
 
 load_config() {
   if [ -f "$CFG_FILE" ]; then
@@ -521,7 +524,7 @@ load_config() {
 save_config() {
   mkdir -p "$CFG_DIR"
   {
-    printf '%s=%q\n' PORT "$PORT" RATE "$RATE" BURST "$BURST" NAME "$NAME" HOST "$HOST" FALLBACK "$FALLBACK" TLS_DOMAIN "$TLS_DOMAIN" TLS_CERT "$TLS_CERT" TLS_KEY "$TLS_KEY" TLS_AUTO "$TLS_AUTO" TLS_SNI "$TLS_SNI" WHITELIST_IPS "$WHITELIST_IPS" WHITELIST_FILE "$WHITELIST_FILE" ALLOW_IPS "$ALLOW_IPS" ALLOWLIST_FILE "$ALLOWLIST_FILE" TRAFFIC_MODE "$TRAFFIC_MODE" TRAFFIC_PERIOD "$TRAFFIC_PERIOD" TRAFFIC_START_DAY "$TRAFFIC_START_DAY" TRAFFIC_LIMIT_MODE "$TRAFFIC_LIMIT_MODE" TRAFFIC_QUOTA "$TRAFFIC_QUOTA" TRAFFIC_THROTTLE_RATE "$TRAFFIC_THROTTLE_RATE" COVER_TRAFFIC "$COVER_TRAFFIC" DOMAIN_WHITELIST "$DOMAIN_WHITELIST"
+    printf '%s=%q\n' PORT "$PORT" RATE "$RATE" BURST "$BURST" NAME "$NAME" HOST "$HOST" FALLBACK "$FALLBACK" TLS_DOMAIN "$TLS_DOMAIN" TLS_CERT "$TLS_CERT" TLS_KEY "$TLS_KEY" TLS_AUTO "$TLS_AUTO" TLS_SNI "$TLS_SNI" WHITELIST_IPS "$WHITELIST_IPS" WHITELIST_FILE "$WHITELIST_FILE" ALLOW_IPS "$ALLOW_IPS" ALLOWLIST_FILE "$ALLOWLIST_FILE" TRAFFIC_MODE "$TRAFFIC_MODE" TRAFFIC_PERIOD "$TRAFFIC_PERIOD" TRAFFIC_START_DAY "$TRAFFIC_START_DAY" TRAFFIC_LIMIT_MODE "$TRAFFIC_LIMIT_MODE" TRAFFIC_QUOTA "$TRAFFIC_QUOTA" TRAFFIC_THROTTLE_RATE "$TRAFFIC_THROTTLE_RATE" COVER_TRAFFIC "$COVER_TRAFFIC" DOMAIN_WHITELIST "$DOMAIN_WHITELIST" SHOW_IP_LINK "$SHOW_IP_LINK"
   } > "$CFG_FILE"
   chmod 600 "$CFG_FILE"
 }
@@ -663,8 +666,51 @@ port_in_use() {
   ss -tln 2>/dev/null | grep -q ":$1[[:space:]]"
 }
 
-# 5) 查看协议：从配置文件读密钥现拼（mmx-server --print-link）；
-#    密钥文件没有就先生成一个再拼。安装完不打印链接，就是为了让链接只在这里出现。
+# 拼一条节点链接的核心（给 show_link 和 show_nodes 共用）：
+#    用法：build_link <地址> [plain|opaque]，默认 opaque（不透明链接，一串乱码）；
+#    plain 是短格式，只在显式指定时用。只把链接打到标准输出（成功时一行
+#    mmx://，失败时空）；调用方自己判断空链接再报错。地址是链接里用的
+#    host（域名或 IP），TLS 分支仍按配置走（真 TLS / 自签 / 明文），
+#    和原来 show_link 的三路分支一致。密钥文件没有就先生成一个再拼。
+build_link() {
+  local host="${1:-}" fmt="${2:-opaque}"
+  case "$fmt" in
+    plain|opaque) ;;
+    *) return 1 ;;
+  esac
+  load_config
+  [ -x "$SERVER_BIN" ] || return 1
+  [ -n "$PORT" ] || return 1
+  if [ ! -s "$PSK_FILE" ]; then
+    echo "密钥文件不存在，先生成一个……" >&2
+    mkdir -p "$CFG_DIR"
+    if command -v openssl >/dev/null 2>&1; then openssl rand -hex 32 > "$PSK_FILE";
+    else od -An -tx1 -N 32 /dev/urandom | tr -d ' \n' > "$PSK_FILE"; fi
+    chmod 600 "$PSK_FILE"
+    systemctl restart mmx-server 2>/dev/null || true
+  fi
+  local psk link
+  psk="$(cat "$PSK_FILE")"
+  if [ -z "$host" ]; then host="${HOST:-}"; fi
+  if [ -z "$host" ]; then host="<你的 VPS 公网 IP>"; fi
+  if [ -n "$TLS_DOMAIN" ]; then
+    link="$("$SERVER_BIN" --print-link --link-format "$fmt" --psk "$psk" --host "$host" --listen "0.0.0.0:$PORT" --rate "$RATE" --burst "$BURST" --name "$NAME" --tls-domain "$TLS_DOMAIN" --tls-cert "$TLS_CERT" --tls-key "$TLS_KEY" 2>/dev/null)"
+  elif [ "${TLS_AUTO:-0}" = "1" ]; then
+    # 自签模式：--print-link 会按路径加载证书（没有就现场生成），
+    # 链接默认是不透明格式（ver=5 + pin，obfs=tls 和默认 sni 不写进链接）。
+    local sni_args=()
+    if [ -n "${TLS_SNI:-}" ]; then sni_args=(--tls-sni "$TLS_SNI"); fi
+    link="$("$SERVER_BIN" --print-link --link-format "$fmt" --psk "$psk" --host "$host" --listen "0.0.0.0:$PORT" --rate "$RATE" --burst "$BURST" --name "$NAME" --tls-auto --tls-cert "$CFG_DIR/tls-cert.pem" --tls-key "$CFG_DIR/tls-key.pem" "${sni_args[@]}" 2>/dev/null)"
+  else
+    link="$("$SERVER_BIN" --print-link --link-format "$fmt" --psk "$psk" --host "$host" --listen "0.0.0.0:$PORT" --rate "$RATE" --burst "$BURST" --name "$NAME" 2>/dev/null)"
+  fi
+  [ -n "$link" ] && printf '%s\n' "$link"
+  return 0
+}
+
+# 单条链接（隐藏用法 --show-link / 换密钥 / 设域名后沿用这个输出）：
+#    从配置文件读密钥现拼（mmx-server --print-link）。安装完不打印链接，
+#    就是为了让链接只在这里出现。
 #    用法：show_link [plain|opaque]，默认 opaque（不透明链接，一串乱码）；
 #    plain 是短格式，只在显式指定时用。
 show_link() {
@@ -676,35 +722,46 @@ show_link() {
   load_config
   if [ ! -x "$SERVER_BIN" ]; then echo "服务端程序不在：$SERVER_BIN（被删了？请重装）"; return 1; fi
   if [ -z "$PORT" ]; then echo "配置缺失（没有端口），请重装服务端。"; return 1; fi
-  if [ ! -s "$PSK_FILE" ]; then
-    echo "密钥文件不存在，先生成一个……"
-    mkdir -p "$CFG_DIR"
-    if command -v openssl >/dev/null 2>&1; then openssl rand -hex 32 > "$PSK_FILE";
-    else od -An -tx1 -N 32 /dev/urandom | tr -d ' \n' > "$PSK_FILE"; fi
-    chmod 600 "$PSK_FILE"
-    systemctl restart mmx-server 2>/dev/null || true
-  fi
-  local psk host link
-  psk="$(cat "$PSK_FILE")"
-  host="$HOST"
-  if [ -n "$TLS_DOMAIN" ]; then
-    host="$TLS_DOMAIN"
-    link="$("$SERVER_BIN" --print-link --link-format "$fmt" --psk "$psk" --host "$host" --listen "0.0.0.0:$PORT" --rate "$RATE" --burst "$BURST" --name "$NAME" --tls-domain "$TLS_DOMAIN" --tls-cert "$TLS_CERT" --tls-key "$TLS_KEY" 2>/dev/null)"
-  elif [ "${TLS_AUTO:-0}" = "1" ]; then
-    # 自签模式：--print-link 会按路径加载证书（没有就现场生成），
-    # 链接默认是不透明格式（ver=5 + pin，obfs=tls 和默认 sni 不写进链接）。
-    local sni_args=()
-    if [ -n "${TLS_SNI:-}" ]; then sni_args=(--tls-sni "$TLS_SNI"); fi
-    if [ -z "$host" ]; then host="<你的 VPS 公网 IP>"; fi
-    link="$("$SERVER_BIN" --print-link --link-format "$fmt" --psk "$psk" --host "$host" --listen "0.0.0.0:$PORT" --rate "$RATE" --burst "$BURST" --name "$NAME" --tls-auto --tls-cert "$CFG_DIR/tls-cert.pem" --tls-key "$CFG_DIR/tls-key.pem" "${sni_args[@]}" 2>/dev/null)"
-  else
-    if [ -z "$host" ]; then host="<你的 VPS 公网 IP>"; fi
-    link="$("$SERVER_BIN" --print-link --link-format "$fmt" --psk "$psk" --host "$host" --listen "0.0.0.0:$PORT" --rate "$RATE" --burst "$BURST" --name "$NAME" 2>/dev/null)"
-  fi
+  local host link
+  if [ -n "$TLS_DOMAIN" ]; then host="$TLS_DOMAIN"; else host="${HOST:-}"; fi
+  link="$(build_link "$host" "$fmt")"
   if [ -z "$link" ]; then echo "拼链接失败（密钥或参数有问题），请看第 9 项日志。"; return 1; fi
   echo ""
   echo "节点链接（粘贴到 mm-x 客户端就能用，绝不要分享给第二个人）："
   echo "$link"
+  echo ""
+}
+
+# 5) 查看节点（主菜单第 5 项）：按节点列表显示，每条节点两行——
+#    第一行是地址（域名或 IP），第二行是它的链接。默认只显示本节点
+#    （域名 / 服务器地址）；IP 链接默认不显示，只有在第 3 项编辑节点
+#    第 14 子项里打开了才同时显示（同一台服务器的 IP 写法链接，
+#    不是第二个独立节点）。公网 IP 探不到、或和第一条地址一样时不显示第二条。
+show_nodes() {
+  load_config
+  if [ ! -x "$SERVER_BIN" ]; then echo "服务端程序不在：$SERVER_BIN（被删了？请重装）"; return 1; fi
+  if [ -z "$PORT" ]; then echo "配置缺失（没有端口），请重装服务端。"; return 1; fi
+  local host1 link1
+  if [ -n "$TLS_DOMAIN" ]; then host1="$TLS_DOMAIN"
+  elif [ -n "${HOST:-}" ]; then host1="$HOST"
+  else host1="$(detect_public_ip)"; [ -z "$host1" ] && host1="<你的 VPS 公网 IP>"; fi
+  link1="$(build_link "$host1" opaque)"
+  if [ -z "$link1" ]; then echo "拼链接失败（密钥或参数有问题），请看第 9 项日志。"; return 1; fi
+  echo ""
+  echo "查看节点"
+  echo "1. $host1"
+  echo "$link1"
+  if [ "${SHOW_IP_LINK:-0}" = "1" ]; then
+    local pubip link2
+    pubip="$(detect_public_ip)"
+    if [ -n "$pubip" ] && [ "$pubip" != "$host1" ]; then
+      link2="$(build_link "$pubip" opaque)"
+      if [ -n "$link2" ]; then
+        echo "2. $pubip"
+        echo "$link2"
+      fi
+    fi
+  fi
   echo ""
 }
 
@@ -761,7 +818,7 @@ rotate_key() {
   chmod 600 "$PSK_FILE"
   echo "密钥已更换（旧密钥 24 小时内仍能用，之后作废）。"
   echo "请用下面的新链接更新客户端："
-  show_link
+  show_nodes
 }
 
 # 8) 修改限速：显示当前值，rate/burst 一起改；严格 50 Mbps = rate=6250K burst=0
@@ -1126,7 +1183,7 @@ HOOK_EOF
   link_check="$(show_link plain 2>&1)" || true
   case "$link_check" in
     *"$dom"*) ;;
-    *) echo "警告：服务已切到真 TLS，但新链接生成异常（见上面），请用菜单第 5 项查看链接。" ;;
+    *) echo "警告：服务已切到真 TLS，但新链接生成异常（见上面），请用菜单第 5 项查看节点。" ;;
   esac
   echo "域名设置完成：真 TLS（$dom），证书由 Let's Encrypt 签发，续期自动重启服务、密钥不变、链接不失效。"
   echo "旧链接已失效（换了证书，pin 变了），请用下面的新链接更新客户端："
@@ -1300,17 +1357,16 @@ add_node() {
   fi
 }
 
-# 3) 编辑节点：先显示当前启动命令，再按项改；改完校验，写回配置，
+# 3) 编辑节点：按项改；改完校验，写回配置，
 #    重载 + 重启，重启失败自动回滚。第 11 项是流量设置（统计模式/周期/
 #    起始日/限制模式/限额/TC 限速值 + 查看流量），第 12 项是掩护流量档位，
-#    第 13 项是域名白名单（off 关 / google 只放行谷歌系域名）。
+#    第 13 项是域名白名单（off 关 / google 只放行谷歌系域名），
+#    第 14 项是 IP 链接开关（在第 5 项查看节点里同时显示 IP 地址的链接）。
 edit_params() {
   while true; do
     load_config
     echo ""
     echo "--- 编辑节点 ---"
-    echo "当前启动命令："
-    if [ -f "$UNIT_FILE" ]; then grep '^ExecStart=' "$UNIT_FILE" | sed 's/^ExecStart=//'; else echo "（服务文件不存在，请重装）"; fi
     echo "1) 端口（当前 $PORT）"
     echo "2) 限速 rate（当前 $RATE）"
     echo "3) 突发 burst（当前 $BURST）"
@@ -1324,6 +1380,7 @@ edit_params() {
     echo "11) 流量设置（统计模式 / 周期 / 限额 / 查看流量）"
     echo "12) 掩护流量（当前 ${COVER_TRAFFIC:-low}：off 关 / low 空闲约 45 秒一帧 / high 空闲约 20 秒一帧）"
     echo "13) 域名白名单（当前 $([ -n "${DOMAIN_WHITELIST:-}" ] && echo "仅谷歌系域名" || echo "关闭")：只放行谷歌系域名时，非谷歌目标直接拒绝）"
+    echo "14) IP 链接（当前 $([ "${SHOW_IP_LINK:-0}" = "1" ] && echo "显示" || echo "不显示")：在第 5 项查看节点里同时显示 IP 地址的链接）"
     echo "0) 返回"
     local c
     read -r -p "改哪一项： " c || return 0
@@ -1440,6 +1497,10 @@ edit_params() {
         fi
         apply_config "域名白名单改为 $([ -n "$DOMAIN_WHITELIST" ] && echo "仅谷歌系域名" || echo "关闭")"
         ;;
+      14)
+        if [ "${SHOW_IP_LINK:-0}" = "1" ]; then SHOW_IP_LINK="0"; else SHOW_IP_LINK="1"; fi
+        apply_config "IP 链接改为 $([ "$SHOW_IP_LINK" = "1" ] && echo "显示" || echo "不显示")（第 5 项查看节点里同时显示 IP 地址的链接）"
+        ;;
       0|"") return 0 ;;
       *) echo "没有这个选项" ;;
     esac
@@ -1537,15 +1598,17 @@ main() {
     [ -n "$TLS_DOMAIN" ] && tls_desc="真 TLS（$TLS_DOMAIN）"
     [ "${TLS_AUTO:-0}" = "1" ] && tls_desc="自签 TLS（SNI ${TLS_SNI:-www.microsoft.com}）"
     if systemctl is-active --quiet mmx-server 2>/dev/null; then
-      echo "服务：正在运行　端口：${PORT:-?}　限速：${RATE:-?}　突发：${BURST:-?}　回退：${FALLBACK:-?}　TLS：$tls_desc"
+      echo "服务：正在运行　端口：${PORT:-?}　限速：${RATE:-?}　突发：${BURST:-?}"
+      echo "回退：${FALLBACK:-?}　TLS：$tls_desc"
     else
-      echo "服务：未运行（用第 7 项重启，或看第 9 项日志）　端口：${PORT:-?}　限速：${RATE:-?}"
+      echo "服务：未运行（用第 7 项重启，或看第 9 项日志）"
+      echo "端口：${PORT:-?}　限速：${RATE:-?}"
     fi
     echo "1) 添加节点"
     echo "2) 载入预设"
     echo "3) 编辑节点"
     echo "4) 删除节点"
-    echo "5) 查看协议"
+    echo "5) 查看节点"
     echo "6) 服务状态"
     echo "7) 重启服务"
     echo "8) 修改限速"
@@ -1559,7 +1622,7 @@ main() {
       2) preset_menu ;;
       3) edit_params ;;
       4) delete_node ;;
-      5) show_link ;;
+      5) show_nodes ;;
       6) show_status ;;
       7) restart_svc ;;
       8) change_rate ;;
@@ -1632,7 +1695,7 @@ echo "密钥文件：$PSK_FILE（重装不换密钥；换密钥请直接改此�
 echo "配置文件：$CFG_FILE（菜单改参数就改这个文件）"
 echo "服务状态：mm 菜单第 6 项，或 systemctl status mmx-server；日志：mm 菜单第 9 项，或 journalctl -u mmx-server -f"
 echo ""
-echo "输入 mmx 打开管理菜单，在菜单第 5 项查看协议（粘贴到 mm-x 客户端就能用，绝不要分享给第二个人）。"
+echo "输入 mmx 打开管理菜单，在菜单第 5 项查看节点（粘贴到 mm-x 客户端就能用，绝不要分享给第二个人）。"
 fi
 
 # --domain：一键申请证书并切真 TLS（只在全新安装/--reinstall 时跑；
