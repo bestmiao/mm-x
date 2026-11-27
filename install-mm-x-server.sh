@@ -6,14 +6,15 @@
 #   预编译的 mmx-server-linux-amd64 放到同一个目录再 sudo 运行）
 #   sudo ./install-mm-x-server.sh [--port 端口] [--rate 限速] [--burst 突发] [--name 节点名] [--host 公网IP或域名]
 #      [--fallback site|silent] [--tls-domain 域名 --tls-cert 证书 --tls-key 私钥]
-#      [--tls-auto [--tls-sni 域名]]（没域名时用自签 TLS + SPKI 锁定，和真 TLS 二选一）
+#      [--tls-auto [--tls-sni 域名]] [--domain 域名]（没域名时用自签 TLS + SPKI 锁定，和真 TLS 二选一；
+#      --domain 是一键：装完自动申请 Let's Encrypt 证书并切真 TLS，DNS 须先指到本机、80 端口空闲）
 # 默认：端口 443（没传 --port 时用 443；443 被 nginx/Apache 等占了会报错停下，
 # 先停掉占用的服务或传 --port 换端口）、不限速（rate=0；想限速再传 --rate，例如 6250K = 50 Mbps）、突发 0（严格模式：限速时任何时候都不超过限速；旧默认 15M 会让每条新连接开头先冲 15MB 再限速，实测 30MB 文件平均跑到 96 Mbps、峰值 1300 Mbps，等于没限——YouTube 这种多连接、分段取数据的流量，每段都落在突发里，更是全程不限）。
 # 脚本会：装二进制到 /usr/local/bin/mmx-server；生成/保留 /etc/mmx/psk（重装不换密钥，
 #   旧密钥靠服务端的 24 小时宽限期继续用）；默认开 BBR（开不了只警告）；放行防火墙端口；
 #   写 /etc/mmx/config（全部参数都在这里，菜单改参数就改这个文件）；写 systemd 服务
 #   （开机自启、崩溃自动重启）；装管理菜单 /usr/local/bin/mmx（输入 mmx 呼出）。
-# 安装完不打印 mmx:// 链接——链接在 mm 菜单第 1 项里看。
+# 安装完不打印 mmx:// 链接——链接在 mm 菜单第 5 项里看。
 # 再跑一次本脚本：默认只更新程序文件（服务端二进制、管理菜单、服务文件），
 # 节点配置（端口/密钥/TLS/流量设置）原样保留，不会重置；彻底重装节点（换端口/
 # 重置配置）必须显式加 --reinstall（交互终端里还会再确认一次，默认不重装）。
@@ -43,16 +44,17 @@ TLS_CERT=""
 TLS_KEY=""
 TLS_AUTO="0"
 TLS_SNI=""
+DOMAIN_SETUP="" # --domain 传过就置为域名：装完一键申请证书并切真 TLS（只在全新安装/--reinstall 时跑）
 WHITELIST_IPS=()
 WHITELIST_FILE=""
 ALLOW_IPS=()
 ALLOWLIST_FILE=""
 # 流量统计与限额（全服务总量）：默认不限额（只统计，不限制），
-# 不改变现有行为；想限制时用下面 6 个参数或 mm 菜单第 8 项里的流量设置。
+# 不改变现有行为；想限制时用下面 6 个参数或 mm 菜单第 3 项（编辑节点）里的流量设置。
 TRAFFIC_MODE="total"
 TRAFFIC_PERIOD="monthly"
 TRAFFIC_START_DAY="1"
-TRAFFIC_LIMIT_MODE="block"
+TRAFFIC_LIMIT_MODE="throttle"
 TRAFFIC_QUOTA="0"
 TRAFFIC_THROTTLE_RATE="125K"
 # 掩护流量（v5 会话）：默认 low（空闲时平均约 45 秒一帧小记录）；
@@ -62,19 +64,19 @@ COVER_TRAFFIC="low"
 # （GCP 预设用，保 GCP 每月 200 GiB 免费额度不被非谷歌流量吃掉）。
 DOMAIN_WHITELIST=""
 
-# 预设的流量设置（和菜单第 9 项“载入预设”同一份值；只改流量相关字段、RATE
+# 预设的流量设置（和菜单第 2 项“载入预设”同一份值；只改流量相关字段、RATE
 # 和域名白名单，不动端口/密钥/TLS/SNI；180G = 阿桑说的 200G 减 20G 余量；125K ≈ 1 Mbps）。
 # GCP 多开一个域名白名单（只放行谷歌系域名，保免费额度）；阿里云CDT 不开。
 set_preset_vars() {
   case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
     gcp|1|谷歌|谷歌云)
       TRAFFIC_MODE="total"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
-      TRAFFIC_LIMIT_MODE="block"; TRAFFIC_QUOTA="180G"; TRAFFIC_THROTTLE_RATE="125K"; RATE="0"
+      TRAFFIC_LIMIT_MODE="throttle"; TRAFFIC_QUOTA="180G"; TRAFFIC_THROTTLE_RATE="125K"; RATE="0"
       DOMAIN_WHITELIST="google"
       ;;
     cdt|2|阿里云|阿里云cdt)
       TRAFFIC_MODE="max"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
-      TRAFFIC_LIMIT_MODE="block"; TRAFFIC_QUOTA="180G"; TRAFFIC_THROTTLE_RATE="125K"; RATE="0"
+      TRAFFIC_LIMIT_MODE="throttle"; TRAFFIC_QUOTA="180G"; TRAFFIC_THROTTLE_RATE="125K"; RATE="0"
       DOMAIN_WHITELIST=""
       ;;
     *)
@@ -82,8 +84,21 @@ set_preset_vars() {
   esac
 }
 
+# 域名格式：每段 1-63 字符（字母数字或连字符，不以连字符开头/结尾），
+# 至少两段，最后一段（TLD）是至少 2 位字母，总长不超过 253。
+valid_domain() {
+  local d="$1" tld
+  [ -n "$d" ] || return 1
+  [ "${#d}" -le 253 ] || return 1
+  printf '%s' "$d" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$' || return 1
+  tld="${d##*.}"
+  [ "${#tld}" -ge 2 ] || return 1
+  case "$tld" in *[!A-Za-z]*) return 1;; esac
+  return 0
+}
+
 usage() {
-  echo "用法：sudo $0 [--port 端口] [--rate 限速] [--burst 突发] [--name 节点名] [--host 公网IP或域名] [--bin 服务端二进制路径] [--whitelist-ip 中转机IP] [--whitelist-file 白名单文件] [--fallback site|silent] [--tls-domain 域名 --tls-cert 证书 --tls-key 私钥] [--preset gcp|cdt] [--reinstall]"
+  echo "用法：sudo $0 [--port 端口] [--rate 限速] [--burst 突发] [--name 节点名] [--host 公网IP或域名] [--bin 服务端二进制路径] [--whitelist-ip 中转机IP] [--whitelist-file 白名单文件] [--fallback site|silent] [--tls-domain 域名 --tls-cert 证书 --tls-key 私钥] [--preset gcp|cdt] [--domain 域名] [--reinstall]"
   echo "  --port   监听端口，默认 443（更像正常 HTTPS；不要用一眼能猜到的端口）"
   echo "           443 被占时本脚本会直接报错停下，先停掉占用的服务（例如 systemctl stop nginx）或换个端口再装"
   echo "  --reinstall 彻底重装节点：按本次传入参数重写 /etc/mmx/config（端口/限速/TLS/流量设置都会重置；"
@@ -113,24 +128,29 @@ usage() {
   echo "                   （证书一般在 /etc/letsencrypt/live/你的域名/fullchain.pem 和 privkey.pem）"
   echo "  --tls-auto       自签 TLS 模式（没域名时用）：首次启动自动生成自签证书并存到 /etc/mmx/tls-cert.pem 和"
   echo "                   /etc/mmx/tls-key.pem；客户端靠 mmx:// 链接里的 pin（SPKI 指纹）锁定验证，不跳过验证。"
-  echo "                   和 --tls-domain 二选一；以后有了域名再用菜单第 7 项换成真 TLS"
+  echo "                   和 --tls-domain 二选一；以后有了域名再用菜单第 3 项（编辑节点）→ 第 10 子项换成真 TLS"
   echo "  --tls-sni        自签 TLS 的默认 SNI（一个常见域名，例如 www.microsoft.com，默认就是它）；"
   echo "                   链接里写了 sni 参数就以链接为准"
+  echo "  --domain   一键设置域名：装完自动申请 Let's Encrypt 证书并切到真 TLS（只在全新安装/"
+  echo "           --reinstall 时跑；再跑脚本只更新程序文件时忽略，改域名请用 mmx 菜单第 3 项（编辑节点）→ 第 10 子项）。"
+  echo "           域名 DNS 必须先指到这台 VPS，80 端口要空着（certbot standalone 校验用）；"
+  echo "           续期用 --reuse-key（密钥不变，pin 不变，链接不失效），续期后自动重启服务。"
+  echo "           申请失败时服务仍用自签 TLS 继续跑，不会留半切的配置；和 --tls-domain 不能同时用"
   echo "  流量统计与限额（默认不限额，只统计不限制；改了限额才限制）："
   echo "  --traffic-mode   统计模式，默认 total：outbound（出站，下载方向）/ inbound（入站，上传方向）/"
   echo "                   total（总计，入站+出站）/ max（最大值，取两者中大的那个）"
   echo "  --traffic-period 统计周期，默认 monthly：monthly（月）/ quarterly（季，1/4/7/10 月起）/ yearly（年）"
   echo "  --traffic-start-day 周期起始日，默认 1：1–31 号，月不足天数时按当月最后一天算（31 号在 2 月按 28/29 号算）"
-  echo "  --traffic-limit-mode 超限后的限制模式，默认 block：block（阻断，拒绝新连接并断开现有连接）/"
-  echo "                   throttle（TC 限速，降到 --traffic-throttle-rate 继续用）"
+  echo "  --traffic-limit-mode 超限后的限制模式，默认 throttle：throttle（TC 限速，降到 --traffic-throttle-rate 继续用）/"
+  echo "                   block（阻断，拒绝新连接并断开现有连接）"
   echo "  --traffic-quota  每周期流量限额，默认 0（不限）：数字 + K/M/G/T，例如 500G、1T"
   echo "  --traffic-throttle-rate TC 限速值，默认 125K（约 1 Mbps）：超限后全站降到的速度，例如 1M"
   echo "  --cover-traffic  掩护流量（v5 会话），默认 low：off（关）/ low（空闲时平均约 45 秒一帧小记录）/"
   echo "                   high（空闲时平均约 20 秒一帧）"
   echo "  --domain-whitelist 目标域名白名单，默认关：off（关）/ google（只放行谷歌系域名，其他目标直接拒绝；"
   echo "                   IP 字面量目标只放行 Google 公共 DNS 8.8.8.8/8.8.4.4，其余拒绝）"
-  echo "  --preset   载入预设的流量设置（和菜单第 9 项一样）：gcp（GCP：180G / 总计 / 月 / 1日 / 阻断 / 不限速 / 白名单仅谷歌系）"
-  echo "           或 cdt（阿里云CDT：180G / 最大值 / 月 / 1日 / 阻断 / 不限速 / 无白名单）；只改流量设置和域名白名单，不动端口/密钥/TLS；"
+  echo "  --preset   载入预设的流量设置（和菜单第 2 项一样）：gcp（GCP：180G / 总计 / 月 / 1日 / TC 限速 / 不限速 / 白名单仅谷歌系）"
+  echo "           或 cdt（阿里云CDT：180G / 最大值 / 月 / 1日 / TC 限速 / 不限速 / 无白名单）；只改流量设置和域名白名单，不动端口/密钥/TLS；"
   echo "           后面再传 --traffic-* / --domain-whitelist 可以单独再改其中一项"
   exit 1
 }
@@ -153,6 +173,7 @@ while [ $# -gt 0 ]; do
     --tls-key) TLS_KEY="$2"; shift 2 ;;
     --tls-auto) TLS_AUTO="1"; shift ;;
     --tls-sni) TLS_SNI="$2"; shift 2 ;;
+    --domain) DOMAIN_SETUP="$2"; shift 2 ;;
     --traffic-mode) TRAFFIC_MODE="$2"; shift 2 ;;
     --traffic-period) TRAFFIC_PERIOD="$2"; shift 2 ;;
     --traffic-start-day) TRAFFIC_START_DAY="$2"; shift 2 ;;
@@ -181,7 +202,10 @@ if [ -f "$CFG_FILE" ] && [ "$REINSTALL" != "1" ]; then
   UPDATE_ONLY="1"
   . "$CFG_FILE"
   echo "检测到已安装的 mm-x 节点（端口 ${PORT:-未知}），本次只更新程序文件（服务端二进制、管理菜单、服务文件），不改节点配置。"
-  echo "安装参数（--port/--rate/--preset/--traffic-* 等）已忽略；改节点参数请用 mmx 菜单；要彻底重装节点请加 --reinstall。"
+  echo "安装参数（--port/--rate/--preset/--traffic-*/--domain 等）已忽略；改节点参数请用 mmx 菜单；要彻底重装节点请加 --reinstall。"
+  if [ -n "${DOMAIN_SETUP:-}" ]; then
+    echo "已忽略 --domain $DOMAIN_SETUP：只更新程序文件时不改 TLS 设置；要设置域名请用 mmx 菜单第 3 项（编辑节点）→ 第 10 子项，或加 --reinstall 重装时再传 --domain。"
+  fi
 fi
 # --reinstall 是显式重装：交互终端里再确认一次（默认不重装）；管道/自动化里直接执行。
 if [ "$REINSTALL" = "1" ] && [ -f "$CFG_FILE" ] && [ -t 0 ]; then
@@ -191,6 +215,20 @@ if [ "$REINSTALL" = "1" ] && [ -f "$CFG_FILE" ] && [ -t 0 ]; then
     echo "已取消重装，现有节点未动。"
     exit 0
   fi
+fi
+
+# --domain：一键申请证书并切真 TLS（只在全新安装/--reinstall 时跑；
+# 更新模式上面已经忽略该参数，不走这里）。和手动给证书的
+# --tls-domain/--tls-cert/--tls-key 不能同时用。先以自签 TLS 起服务，
+# 装完再调菜单的 setup_domain 申请证书——申请失败服务仍用自签 TLS，
+# 不会留半切的配置。
+if [ -n "$DOMAIN_SETUP" ] && [ "$UPDATE_ONLY" = "0" ]; then
+  if [ -n "$TLS_DOMAIN" ] || [ -n "$TLS_CERT" ] || [ -n "$TLS_KEY" ]; then
+    echo "--domain（一键申请证书）和 --tls-domain/--tls-cert/--tls-key（手动给证书）不能同时用，二选一"
+    exit 1
+  fi
+  valid_domain "$DOMAIN_SETUP" || { echo "域名不对：$DOMAIN_SETUP（应为域名，例如 example.com；不要带 http:// 或端口）"; exit 1; }
+  TLS_AUTO="1"
 fi
 
 # 回退模式与真 TLS 参数校验
@@ -336,7 +374,7 @@ else
 fi
 
 # 2) 密钥：/etc/mmx/psk 没有就生成（64 位十六进制，32 字节），有了就保留——
-#    重装/更新不换密钥，轮换密钥请用 mm 菜单第 4 项（服务端 24 小时宽限期内新旧密钥都能用）
+#    重装/更新不换密钥；轮换密钥已从主菜单移除（直接改 /etc/mmx/psk，服务端自动识别，24 小时内新旧密钥都能用）
 mkdir -p "$CFG_DIR"
 if [ -f "$PSK_FILE" ]; then
   echo "密钥文件已存在（$PSK_FILE），保留旧密钥，不重新生成"
@@ -413,7 +451,7 @@ case "$HOST" in
   127.*|10.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|192.168.*) HOST="" ;;
 esac
 if [ -z "$HOST" ]; then
-  echo "警告：探测不到公网 IP，菜单里拼链接时会用占位地址，记得在菜单第 8 项里把服务器地址改成你的 VPS 公网 IP 或域名"
+  echo "警告：探测不到公网 IP，菜单里拼链接时会用占位地址，记得在菜单第 3 项里把服务器地址改成你的 VPS 公网 IP 或域名"
   HOST=""
 fi
 
@@ -439,16 +477,18 @@ echo "== 安装管理菜单 =="
 cat > "$BIN_DIR/mmx" <<'MM_MENU_EOF'
 #!/bin/bash
 # mm-x 服务端管理菜单：在 VPS 上输入 mmx 呼出。
-# 功能：1 显示协议链接  2 查看服务状态  3 重启服务  4 更换密钥  5 修改限速
-#       6 查看最近日志  7 诱饵回退 / TLS 设置（真 TLS、自签 TLS、查指纹）  8 修改节点参数（含流量设置、域名白名单）
-#       9 载入预设（GCP / 阿里云CDT 的流量设置）  10 卸载  11 退出
+# 功能：1 添加节点  2 载入预设（GCP / 阿里云CDT 的流量设置）  3 编辑节点（含流量设置、域名白名单）
+#       4 删除节点  5 查看协议  6 服务状态  7 重启服务  8 修改限速
+#       9 查看日志  10 卸载  11 退出
+# （更换密钥、诱饵回退 / TLS 设置已从主菜单移除，函数保留在脚本内；TLS 入口在第 3 项编辑节点第 10 子项）
 # 全部配置存在 /etc/mmx/config，密钥在 /etc/mmx/psk；
 # systemd 服务由本脚本按配置文件生成，改参数后自动重载 + 重启，
 # 重启失败自动回滚到改之前的配置，不会让服务起不来。
 # 隐藏用法（给部署脚本和脚本调用）：mmx --write-service（按配置写服务文件）、mmx --show-link [plain|opaque]（只打印链接，
 # 默认 opaque 不透明链接；plain 是短格式，只在显式指定时用）、
 # mmx --show-pin（只打印 TLS 证书的 SPKI 指纹）、mmx --show-traffic（打印本周期流量统计）、
-# mmx --preset <gcp|cdt>（不进菜单直接载入预设，GCP 或阿里云CDT）。
+# mmx --preset <gcp|cdt>（不进菜单直接载入预设，GCP 或阿里云CDT）、
+# mmx --setup-domain <域名>（一键申请 Let's Encrypt 证书并切真 TLS，部署脚本的 --domain 也走这里）。
 set -u
 
 ROOT="${MMX_TEST_ROOT:-}"
@@ -467,7 +507,7 @@ FALLBACK="site"; TLS_DOMAIN=""; TLS_CERT=""; TLS_KEY=""
 TLS_AUTO="0"; TLS_SNI=""
 WHITELIST_IPS=""; WHITELIST_FILE=""; ALLOW_IPS=""; ALLOWLIST_FILE=""
 TRAFFIC_MODE="total"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
-TRAFFIC_LIMIT_MODE="block"; TRAFFIC_QUOTA="0"; TRAFFIC_THROTTLE_RATE="125K"
+TRAFFIC_LIMIT_MODE="throttle"; TRAFFIC_QUOTA="0"; TRAFFIC_THROTTLE_RATE="125K"
 COVER_TRAFFIC="low"
 DOMAIN_WHITELIST=""
 
@@ -503,7 +543,7 @@ write_service() {
   if [ -n "$ALLOWLIST_FILE" ]; then al_args="$al_args --allowlist-file $ALLOWLIST_FILE"; fi
   # 流量统计与限额：一直写进启动参数（限额 0 = 不限，只统计不限制）；
   # 计数持久化文件固定在配置目录下（/etc/mmx/traffic.json）。
-  traffic_args=" --traffic-mode ${TRAFFIC_MODE:-total} --traffic-period ${TRAFFIC_PERIOD:-monthly} --traffic-start-day ${TRAFFIC_START_DAY:-1} --traffic-limit-mode ${TRAFFIC_LIMIT_MODE:-block} --traffic-quota ${TRAFFIC_QUOTA:-0} --traffic-throttle-rate ${TRAFFIC_THROTTLE_RATE:-125K} --traffic-file $CFG_DIR/traffic.json"
+  traffic_args=" --traffic-mode ${TRAFFIC_MODE:-total} --traffic-period ${TRAFFIC_PERIOD:-monthly} --traffic-start-day ${TRAFFIC_START_DAY:-1} --traffic-limit-mode ${TRAFFIC_LIMIT_MODE:-throttle} --traffic-quota ${TRAFFIC_QUOTA:-0} --traffic-throttle-rate ${TRAFFIC_THROTTLE_RATE:-125K} --traffic-file $CFG_DIR/traffic.json"
   # 掩护流量（v5 会话）：一直写进启动参数，默认 low。
   cover_args=" --cover-traffic ${COVER_TRAFFIC:-low}"
   # 目标域名白名单：只在开了时写进启动参数（默认关，不写）。
@@ -595,7 +635,7 @@ traffic_period_label() {
   esac
 }
 traffic_limit_label() {
-  case "${TRAFFIC_LIMIT_MODE:-block}" in
+  case "${TRAFFIC_LIMIT_MODE:-throttle}" in
     throttle) echo "TC 限速" ;; *) echo "阻断" ;;
   esac
 }
@@ -605,12 +645,25 @@ valid_ip_cidr() {
   printf '%s' "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$'
 }
 
+# 域名格式：每段 1-63 字符（字母数字或连字符，不以连字符开头/结尾），
+# 至少两段，最后一段（TLD）是至少 2 位字母，总长不超过 253。
+valid_domain() {
+  local d="$1" tld
+  [ -n "$d" ] || return 1
+  [ "${#d}" -le 253 ] || return 1
+  printf '%s' "$d" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$' || return 1
+  tld="${d##*.}"
+  [ "${#tld}" -ge 2 ] || return 1
+  case "$tld" in *[!A-Za-z]*) return 1;; esac
+  return 0
+}
+
 port_in_use() {
   command -v ss >/dev/null 2>&1 || return 1
   ss -tln 2>/dev/null | grep -q ":$1[[:space:]]"
 }
 
-# 1) 显示协议链接：从配置文件读密钥现拼（mmx-server --print-link）；
+# 5) 查看协议：从配置文件读密钥现拼（mmx-server --print-link）；
 #    密钥文件没有就先生成一个再拼。安装完不打印链接，就是为了让链接只在这里出现。
 #    用法：show_link [plain|opaque]，默认 opaque（不透明链接，一串乱码）；
 #    plain 是短格式，只在显式指定时用。
@@ -648,7 +701,7 @@ show_link() {
     if [ -z "$host" ]; then host="<你的 VPS 公网 IP>"; fi
     link="$("$SERVER_BIN" --print-link --link-format "$fmt" --psk "$psk" --host "$host" --listen "0.0.0.0:$PORT" --rate "$RATE" --burst "$BURST" --name "$NAME" 2>/dev/null)"
   fi
-  if [ -z "$link" ]; then echo "拼链接失败（密钥或参数有问题），请看第 6 项日志。"; return 1; fi
+  if [ -z "$link" ]; then echo "拼链接失败（密钥或参数有问题），请看第 9 项日志。"; return 1; fi
   echo ""
   echo "节点链接（粘贴到 mm-x 客户端就能用，绝不要分享给第二个人）："
   echo "$link"
@@ -656,7 +709,7 @@ show_link() {
 }
 
 # 1b) 显示 TLS 证书的 SPKI 指纹（pin）：客户端锁定验证就靠它；换了证书指纹会变，
-#     链接也要重新生成（第 1 项）。TLS 没开时无指纹。
+#     链接也要重新生成（第 5 项）。TLS 没开时无指纹。
 show_pin() {
   load_config
   if [ ! -x "$SERVER_BIN" ]; then echo "服务端程序不在：$SERVER_BIN（被删了？请重装）"; return 1; fi
@@ -667,18 +720,18 @@ show_pin() {
     if [ -n "${TLS_SNI:-}" ]; then sni_args=(--tls-sni "$TLS_SNI"); fi
     "$SERVER_BIN" --print-pin --tls-auto --tls-cert "$CFG_DIR/tls-cert.pem" --tls-key "$CFG_DIR/tls-key.pem" "${sni_args[@]}" 2>&1
   else
-    echo "TLS 没开（真 TLS 和自签 TLS 都关着），没有指纹。想开去第 7 项。"
+    echo "TLS 没开（真 TLS 和自签 TLS 都关着），没有指纹。想开去第 3 项（编辑节点）→ 第 10 子项。"
     return 1
   fi
 }
 
-# 2) 查看服务状态
+# 6) 服务状态
 show_status() {
   load_config
   if systemctl is-active --quiet mmx-server 2>/dev/null; then
     echo "服务状态：正在运行"
   else
-    echo "服务状态：未运行（用第 3 项重启，或看第 6 项日志找原因）"
+    echo "服务状态：未运行（用第 7 项重启，或看第 9 项日志找原因）"
   fi
   systemctl status mmx-server --no-pager 2>&1 | head -20 || true
   if command -v ss >/dev/null 2>&1 && [ -n "$PORT" ]; then
@@ -686,17 +739,17 @@ show_status() {
   fi
 }
 
-# 3) 重启服务
+# 7) 重启服务
 restart_svc() {
   if systemctl restart mmx-server 2>/dev/null && systemctl is-active --quiet mmx-server 2>/dev/null; then
     echo "重启成功，服务正在运行"
   else
-    echo "重启失败！请看第 6 项日志：journalctl -u mmx-server -n 50"
+    echo "重启失败！请看第 9 项日志：journalctl -u mmx-server -n 50"
     return 1
   fi
 }
 
-# 4) 更换密钥：写新密钥进 /etc/mmx/psk，服务端按 24 小时宽限期自动识别新密钥，
+# 更换密钥（已从主菜单移除，函数保留）：写新密钥进 /etc/mmx/psk，服务端按 24 小时宽限期自动识别新密钥，
 #    不用重启；旧链接 24 小时内仍能用，之后作废。
 rotate_key() {
   load_config
@@ -711,7 +764,7 @@ rotate_key() {
   show_link
 }
 
-# 5) 修改限速：显示当前值，rate/burst 一起改；严格 50 Mbps = rate=6250K burst=0
+# 8) 修改限速：显示当前值，rate/burst 一起改；严格 50 Mbps = rate=6250K burst=0
 change_rate() {
   load_config
   echo "当前限速：rate=$RATE（字节/秒），burst=$BURST"
@@ -731,7 +784,7 @@ change_rate() {
   apply_config "限速改为 rate=$RATE burst=$BURST"
 }
 
-# 6) 查看最近日志
+# 9) 查看日志
 show_logs() {
   if command -v journalctl >/dev/null 2>&1; then
     journalctl -u mmx-server -n 50 --no-pager 2>&1 || echo "读日志失败"
@@ -746,13 +799,13 @@ show_logs() {
 show_traffic() {
   load_config
   if [ ! -x "$SERVER_BIN" ]; then echo "服务端程序不在：$SERVER_BIN（被删了？请重装）"; return 1; fi
-  "$SERVER_BIN" --traffic-status --traffic-mode "${TRAFFIC_MODE:-total}" --traffic-period "${TRAFFIC_PERIOD:-monthly}" --traffic-start-day "${TRAFFIC_START_DAY:-1}" --traffic-limit-mode "${TRAFFIC_LIMIT_MODE:-block}" --traffic-quota "${TRAFFIC_QUOTA:-0}" --traffic-throttle-rate "${TRAFFIC_THROTTLE_RATE:-125K}" --traffic-file "$CFG_DIR/traffic.json" 2>&1
+  "$SERVER_BIN" --traffic-status --traffic-mode "${TRAFFIC_MODE:-total}" --traffic-period "${TRAFFIC_PERIOD:-monthly}" --traffic-start-day "${TRAFFIC_START_DAY:-1}" --traffic-limit-mode "${TRAFFIC_LIMIT_MODE:-throttle}" --traffic-quota "${TRAFFIC_QUOTA:-0}" --traffic-throttle-rate "${TRAFFIC_THROTTLE_RATE:-125K}" --traffic-file "$CFG_DIR/traffic.json" 2>&1
 }
 
 # 流量设置：统计模式 / 周期 / 起始日 / 限制模式 / 限额 / TC 限速值都能改，
 # 改完走 apply_config（重载 + 重启，失败自动回滚）；只改限额/限制模式/
 # TC 限速值不重置计数，改统计模式/周期/起始日会按新口径重算。
-# 入口在第 8 项“修改节点参数”子菜单第 11 项。
+# 入口在第 3 项“编辑节点”子菜单第 11 项。
 traffic_menu() {
   while true; do
     load_config
@@ -865,11 +918,13 @@ traffic_menu() {
   done
 }
 
-# 9) 载入预设：GCP / 阿里云CDT 的流量设置（和 vx 的载入预设同一份值）。
-#    GCP：180G / 总计 / 月 / 1日 / 阻断 / 不限速 / 白名单仅谷歌系；
-#    阿里云CDT：180G / 最大值 / 月 / 1日 / 阻断 / 不限速 / 无白名单。
-#    180G = 阿桑说的 200G 减 20G 余量；125K ≈ 1 Mbps（超限后 TC 限速值，阻断模式下用不上）。
-#    只改流量相关字段（TRAFFIC_* 和 RATE）和域名白名单，不动端口/密钥/TLS/SNI。
+# 2) 载入预设：GCP / 阿里云CDT 的流量设置（和 vx 的载入预设同一份值）。
+#    GCP：180G / 总计 / 月 / 1日 / TC 限速 / 不限速 / 白名单仅谷歌系；
+#    阿里云CDT：180G / 最大值 / 月 / 1日 / TC 限速 / 不限速 / 无白名单。
+#    180G = 阿桑说的 200G 减 20G 余量；125K ≈ 1 Mbps（超限后 TC 限速值）。
+#    只改流量相关字段（TRAFFIC_* 和 RATE）和域名白名单，不动端口/密钥/SNI；
+#    选完预设后可顺手填域名（留空跳过）：填了就先跑 setup_domain 申请证书
+#    切真 TLS（失败也不影响载入预设，域名可稍后再设）。
 #    （vx 的地区/SNI 是 VLESS 专属，mm-x 没有，不带过来；白名单是服务端
 #    按域名过滤，和 vx 的 geosite:google 路由效果一样。）
 apply_preset() {
@@ -877,12 +932,12 @@ apply_preset() {
   case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in
     gcp|1|谷歌|谷歌云)
       TRAFFIC_MODE="total"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
-      TRAFFIC_LIMIT_MODE="block"; TRAFFIC_QUOTA="180G"; TRAFFIC_THROTTLE_RATE="125K"; RATE="0"
+      TRAFFIC_LIMIT_MODE="throttle"; TRAFFIC_QUOTA="180G"; TRAFFIC_THROTTLE_RATE="125K"; RATE="0"
       DOMAIN_WHITELIST="google"
       ;;
     cdt|2|阿里云|阿里云cdt)
       TRAFFIC_MODE="max"; TRAFFIC_PERIOD="monthly"; TRAFFIC_START_DAY="1"
-      TRAFFIC_LIMIT_MODE="block"; TRAFFIC_QUOTA="180G"; TRAFFIC_THROTTLE_RATE="125K"; RATE="0"
+      TRAFFIC_LIMIT_MODE="throttle"; TRAFFIC_QUOTA="180G"; TRAFFIC_THROTTLE_RATE="125K"; RATE="0"
       DOMAIN_WHITELIST=""
       ;;
     *)
@@ -891,7 +946,7 @@ apply_preset() {
       ;;
   esac
   local wl_desc="无白名单"; [ -n "$DOMAIN_WHITELIST" ] && wl_desc="白名单仅谷歌系域名"
-  apply_config "载入预设 $name（限额 $TRAFFIC_QUOTA，统计模式 $TRAFFIC_MODE，超限阻断，$wl_desc）"
+  apply_config "载入预设 $name（限额 $TRAFFIC_QUOTA，统计模式 $TRAFFIC_MODE，超限 TC 限速，$wl_desc）"
 }
 
 preset_menu() {
@@ -900,22 +955,33 @@ preset_menu() {
     echo ""
     echo "--- 载入预设 ---"
     echo "当前：限额 ${TRAFFIC_QUOTA:-0}　统计模式：$(traffic_mode_label)　周期：$(traffic_period_label)　限制模式：$(traffic_limit_label)　域名白名单：$([ -n "${DOMAIN_WHITELIST:-}" ] && echo "仅谷歌系域名" || echo "关闭")"
-    echo "1) GCP：180G / 总计 / 月 / 1日 / 阻断 / 不限速 / 白名单仅谷歌系"
-    echo "2) 阿里云CDT：180G / 最大值 / 月 / 1日 / 阻断 / 不限速 / 无白名单"
+    echo "1) GCP：180G / 总计 / 月 / 1日 / TC 限速 / 不限速 / 白名单仅谷歌系"
+    echo "2) 阿里云CDT：180G / 最大值 / 月 / 1日 / TC 限速 / 不限速 / 无白名单"
+    echo "选完预设后会问域名（留空跳过），填了就同时申请证书切真 TLS。"
     echo "0) 返回"
     local c
     read -r -p "选一项： " c || return 0
     case "$c" in
       1|2)
         local pname="GCP"; [ "$c" = "2" ] && pname="阿里云CDT"
+        local dom
+        read -r -p "设置域名（留空跳过；DNS 须先指到本机、80 端口空闲）： " dom || continue
+        local tls_note="不动端口/密钥/TLS"
+        [ -n "$dom" ] && tls_note="不动端口/密钥；同时设置域名 $dom（申请 Let's Encrypt 证书并切真 TLS）"
         if [ "$c" = "1" ]; then
-          echo "要载入 $pname：限额 180G，超限后阻断，并打开域名白名单（只放行谷歌系域名）；只改流量设置和白名单，不动端口/密钥/TLS。"
+          echo "要载入 $pname：限额 180G，超限后 TC 限速，并打开域名白名单（只放行谷歌系域名）；只改流量设置和白名单，$tls_note。"
         else
-          echo "要载入 $pname：限额 180G，超限后阻断，域名白名单关闭；只改流量设置和白名单，不动端口/密钥/TLS。"
+          echo "要载入 $pname：限额 180G，超限后 TC 限速，域名白名单关闭；只改流量设置和白名单，$tls_note。"
         fi
         local yn
         read -r -p "确认载入吗？输入 y 确认： " yn || continue
         case "$yn" in y|Y) ;; *) echo "已取消。"; pause; continue;; esac
+        if [ -n "$dom" ]; then
+          if ! setup_domain "$dom"; then
+            echo "域名设置失败（$dom），预设照常载入；域名可稍后在载入预设里再设。"
+            load_config
+          fi
+        fi
         if [ "$c" = "1" ]; then apply_preset gcp; else apply_preset cdt; fi
         ;;
       0|"") return 0 ;;
@@ -925,9 +991,149 @@ preset_menu() {
   done
 }
 
-# 7) 诱饵回退 / TLS 设置：真 TLS（有域名）和自签 TLS（没域名）二选一；
+# 诱饵回退 / TLS 设置（主菜单已移除；入口在第 3 项“编辑节点”第 10 子项）：真 TLS（有域名）和自签 TLS（没域名）二选一；
 #    自签证书首次启动自动生成并存到 /etc/mmx/tls-cert.pem、tls-key.pem，
-#    客户端靠链接里的 pin（SPKI 指纹）锁定验证；换证书要重新生成链接（第 1 项）。
+#    客户端靠链接里的 pin（SPKI 指纹）锁定验证；换证书要重新生成链接（第 5 项）。
+# 本机公网 IPv4：配置里的 HOST 是 IP 就用它，否则现探测（和部署脚本一样的办法）；
+# 探不到或只探到内网地址就返回空。
+detect_public_ip() {
+  local ip=""
+  case "${HOST:-}" in
+    ''|*[!0-9.]*) ;;
+    *) ip="$HOST" ;;
+  esac
+  case "$ip" in 127.*|10.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|192.168.*) ip="";; esac
+  if [ -z "$ip" ] && command -v curl >/dev/null 2>&1; then
+    ip="$(curl -s --max-time 5 https://checkip.amazonaws.com 2>/dev/null || true)"
+    [ -z "$ip" ] && ip="$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null || true)"
+  fi
+  case "$ip" in 127.*|10.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|192.168.*) ip="";; esac
+  printf '%s' "$ip"
+}
+
+# 域名解析到的 IPv4 列表（每行一个）：先 getent，没有就 dig，没有就 nslookup。
+resolve_domain_ips() {
+  local dom="$1" out=""
+  if command -v getent >/dev/null 2>&1; then
+    out="$(getent hosts "$dom" 2>/dev/null | awk '{print $1}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')"
+  fi
+  if [ -z "$out" ] && command -v dig >/dev/null 2>&1; then
+    out="$(dig +short "$dom" A 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')"
+  fi
+  if [ -z "$out" ] && command -v nslookup >/dev/null 2>&1; then
+    out="$(nslookup "$dom" 2>/dev/null | awk '/^Address: /{print $2}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')"
+  fi
+  printf '%s' "$out"
+}
+
+# 域名一键设置：申请 Let's Encrypt 证书并切到真 TLS（交互入口在第 3 项编辑节点 → 第 10 子项 → 第 6 子项；
+# 隐藏用法 mmx --setup-domain <域名>，部署脚本的 --domain 也走这里）。
+# 步骤：校验域名 → DNS 解析到本机公网 IP → 80 端口空闲 → 装 certbot
+# → certbot certonly --standalone --reuse-key（续期密钥不变，pin 不变）
+# → 校验续期配置 reuse_key → 写续期 deploy-hook（重启服务）
+# → 切真 TLS（apply_config，失败自动回滚）→ 校验新链接能生成。
+# 任何一步失败都返回 1，配置不动，服务仍用原来的 TLS（自签或关）继续跑。
+# 用法：setup_domain <域名>
+setup_domain() {
+  local dom="${1:-}"
+  valid_domain "$dom" || { echo "域名不对：$dom（应为域名，例如 example.com；不要带 http:// 或端口）"; return 1; }
+  if [ -n "${TLS_DOMAIN:-}" ]; then
+    if [ "$TLS_DOMAIN" = "$dom" ]; then
+      echo "真 TLS 已经是这个域名（$dom），不用重复设置。"
+      return 0
+    fi
+    echo "真 TLS 已经开了（域名 $TLS_DOMAIN），先用第 3 项编辑节点 → 第 10 子项 → 第 3 子项关闭再设置新域名。"
+    return 1
+  fi
+  # DNS 必须先指到本机公网 IP，否则 Let's Encrypt 校验通不过
+  local my_ip resolved
+  my_ip="$(detect_public_ip)"
+  if [ -z "$my_ip" ]; then echo "探测不到本机公网 IP，无法校验 DNS；请确认域名已解析到这台 VPS 再试。"; return 1; fi
+  resolved="$(resolve_domain_ips "$dom")"
+  if [ -z "$resolved" ]; then
+    echo "域名 $dom 还没解析（查不到 A 记录），请先在域名商那里把 A 记录指到本机 IP $my_ip，等解析生效再试。"
+    return 1
+  fi
+  local hit=0 ip
+  for ip in $resolved; do [ "$ip" = "$my_ip" ] && hit=1; done
+  if [ "$hit" -ne 1 ]; then
+    echo "域名 $dom 解析到的 IP（$resolved）不是本机公网 IP（$my_ip），Let's Encrypt 校验通不过。"
+    echo "请把 A 记录改成 $my_ip，等解析生效再试。"
+    return 1
+  fi
+  # certbot standalone 要占 80 端口做校验
+  if port_in_use 80; then
+    echo "80 端口已被别的服务占用，certbot standalone 校验需要 80 端口。"
+    echo "请先停掉占用 80 端口的服务（例如 systemctl stop nginx），再试。"
+    return 1
+  fi
+  # 装 certbot（没有就装；测试模式下用替身，不调 apt）
+  if ! command -v certbot >/dev/null 2>&1; then
+    if [ -n "${MMX_TEST_ROOT:-}" ]; then
+      echo "测试模式：没有 certbot（也没有替身），装不了证书。"
+      return 1
+    fi
+    echo "正在安装 certbot……"
+    if ! (apt-get update -qq && apt-get install -y -qq certbot) >/dev/null 2>&1; then
+      echo "certbot 安装失败，请手动安装：apt install certbot -y"
+      return 1
+    fi
+  fi
+  # 申请证书：--reuse-key 是关键——续期时密钥不变，pin 不变，链接才不会每 90 天断一次
+  echo "正在申请 Let's Encrypt 证书（$dom）……"
+  local le_dir="$ROOT/etc/letsencrypt"
+  if ! certbot certonly --standalone --reuse-key --non-interactive --agree-tos --register-unsafely-without-email -d "$dom" >/dev/null 2>&1; then
+    echo "证书申请失败（域名 $dom）：请确认 DNS 已生效、80 端口对外可达、且该域名没被 Let's Encrypt 限速。"
+    return 1
+  fi
+  local cert_file="$le_dir/live/$dom/fullchain.pem"
+  local key_file="$le_dir/live/$dom/privkey.pem"
+  if [ ! -f "$cert_file" ] || [ ! -f "$key_file" ]; then
+    echo "证书申请好像成功了，但找不到证书文件（$cert_file），请检查 certbot 日志。"
+    return 1
+  fi
+  # 续期配置必须带 reuse_key，否则续期换密钥、pin 变、链接断
+  local renewal_conf="$le_dir/renewal/$dom.conf"
+  if [ -f "$renewal_conf" ]; then
+    if ! grep -q "^reuse_key[[:space:]]*=[[:space:]]*True" "$renewal_conf"; then
+      if grep -q "^\[renewalparams\]" "$renewal_conf"; then
+        sed -i '/^\[renewalparams\]/a reuse_key = True' "$renewal_conf"
+      else
+        printf '[renewalparams]\nreuse_key = True\n' >> "$renewal_conf"
+      fi
+      grep -q "^reuse_key[[:space:]]*=[[:space:]]*True" "$renewal_conf" || { echo "续期配置里写不进 reuse_key，证书以后续期会换密钥；请手动检查 $renewal_conf。"; return 1; }
+    fi
+  else
+    echo "找不到续期配置（$renewal_conf），请检查 certbot 安装。"
+    return 1
+  fi
+  # 续期后重启服务，让它加载新证书（密钥复用，pin 不变，链接不用重印）
+  local hook_dir="$le_dir/renewal-hooks/deploy"
+  mkdir -p "$hook_dir"
+  cat > "$hook_dir/restart-mmx-server.sh" <<'HOOK_EOF'
+#!/bin/bash
+# certbot 续期后重启 mmx-server，让它加载新证书（密钥复用，pin 不变）。
+systemctl restart mmx-server
+HOOK_EOF
+  chmod +x "$hook_dir/restart-mmx-server.sh"
+  # 切真 TLS（apply_config：备份 → 写配置 → 写服务 → 重启，失败自动回滚）
+  TLS_DOMAIN="$dom"; TLS_CERT="$cert_file"; TLS_KEY="$key_file"; TLS_AUTO="0"; TLS_SNI=""
+  if ! apply_config "开启真 TLS（域名 $dom，Let's Encrypt）"; then
+    return 1
+  fi
+  # 校验：新链接能生成且地址是域名（plain 格式里域名明文可见；opaque 格式是乱码，看不到域名）
+  local link_check
+  link_check="$(show_link plain 2>&1)" || true
+  case "$link_check" in
+    *"$dom"*) ;;
+    *) echo "警告：服务已切到真 TLS，但新链接生成异常（见上面），请用菜单第 5 项查看链接。" ;;
+  esac
+  echo "域名设置完成：真 TLS（$dom），证书由 Let's Encrypt 签发，续期自动重启服务、密钥不变、链接不失效。"
+  echo "旧链接已失效（换了证书，pin 变了），请用下面的新链接更新客户端："
+  show_link
+  return 0
+}
+
 tls_menu() {
   while true; do
     load_config
@@ -946,6 +1152,7 @@ tls_menu() {
     echo "3) 关闭 TLS（真 TLS 和自签 TLS 都关）"
     echo "4) 开启自签 TLS（没域名时用，证书自动生成，客户端用指纹锁定）"
     echo "5) 查看 TLS 指纹（pin）"
+    echo "6) 一键设置域名（申请 Let's Encrypt 证书并切真 TLS，DNS 须先指到本机、80 端口空闲）"
     echo "0) 返回"
     local c
     read -r -p "选一项： " c || return 0
@@ -972,7 +1179,7 @@ tls_menu() {
         if [ ! -f "$key" ]; then echo "私钥文件不存在：$key"; pause; continue; fi
         TLS_DOMAIN="$dom"; TLS_CERT="$cert"; TLS_KEY="$key"
         if [ "$PORT" != "443" ]; then
-          echo "提示：真 TLS 开了，但端口不是 443（当前 $PORT）；443 更像正常 HTTPS，想改去第 8 项改端口。"
+          echo "提示：真 TLS 开了，但端口不是 443（当前 $PORT）；443 更像正常 HTTPS，想改去第 3 项改端口。"
         fi
         apply_config "开启真 TLS（域名 $TLS_DOMAIN）"
         ;;
@@ -992,10 +1199,15 @@ tls_menu() {
         TLS_AUTO="1"
         apply_config "开启自签 TLS（SNI ${TLS_SNI:-www.microsoft.com}）"
         echo "证书首次启动自动生成，存在 /etc/mmx/tls-cert.pem 和 tls-key.pem；"
-        echo "链接里的 pin 就是证书指纹（第 1 项的链接已带上，换了证书要重新生成链接）。"
+        echo "链接里的 pin 就是证书指纹（第 5 项的链接已带上，换了证书要重新生成链接）。"
         ;;
       5)
         show_pin
+        ;;
+      6)
+        local dom
+        read -r -p "域名（DNS 必须先指到这台 VPS，80 端口要空着）： " dom || continue
+        setup_domain "$dom"
         ;;
       0|"") return 0 ;;
       *) echo "没有这个选项" ;;
@@ -1004,7 +1216,91 @@ tls_menu() {
   done
 }
 
-# 8) 修改节点参数：先显示当前启动命令，再按项改；改完校验，写回配置，
+# 1) 添加节点：向导式新建节点，依次问端口 / 节点名 / 流量限额 /
+#    周期起始日 / 超限模式 / TC 限速值 / 域名，空输入用默认值；每项都校验，
+#    不合法就重问；已有节点时先确认覆盖；写完走 apply_config
+#    （重载 + 重启，失败自动回滚），再跑 setup_domain（填了域名才跑，
+#    失败也不影响已建好的节点，域名可稍后在载入预设里再设）。
+#    服务器地址空着时自动探测公网 IP；密钥文件没有就生成一个（和安装流程一样）。
+add_node() {
+  load_config
+  if [ -f "$CFG_FILE" ]; then
+    echo "已有节点（端口 ${PORT:-?}，节点名 ${NAME:-?}），重新添加会覆盖当前节点配置。"
+    local yn
+    read -r -p "继续吗？[y/N] " yn || return 0
+    case "$yn" in y|Y) ;; *) echo "已取消。"; return 0;; esac
+  fi
+  local np nm nq nd nl nt
+  while true; do
+    read -r -p "端口（默认 443）： " np || return 0
+    [ -z "$np" ] && np="443"
+    valid_port "$np" && break
+    echo "端口不合法：$np，应为 1-65535 之间的数字"
+  done
+  if [ "$np" != "${PORT:-}" ] && port_in_use "$np"; then
+    echo "端口 $np 已被别的服务占用！"
+    if [ "$np" = "443" ]; then echo "443 常见占用：nginx / Apache / 其他 Web 服务，先停掉它（systemctl stop nginx）再添加。"; fi
+    local yn2
+    read -r -p "仍要用 $np 吗？（服务可能起不来，失败会自动回滚）[y/N] " yn2 || return 0
+    case "$yn2" in y|Y) ;; *) echo "已取消。"; return 0;; esac
+  fi
+  read -r -p "节点名（默认 mm-x）： " nm || return 0
+  [ -z "$nm" ] && nm="mm-x"
+  while true; do
+    read -r -p "流量限额（默认 0 = 不限，例如 180G、500G、1T）： " nq || return 0
+    [ -z "$nq" ] && nq="0"
+    valid_bytes "$nq" && break
+    echo "流量限额格式不对：$nq（应为数字 + 可选 K/M/G/T，例如 500G、1T、0）"
+  done
+  while true; do
+    read -r -p "周期起始日（默认 1，1–31 号）： " nd || return 0
+    [ -z "$nd" ] && nd="1"
+    case "$nd" in ''|*[!0-9]*) echo "周期起始日不合法：$nd，应为 1–31 号"; continue;; esac
+    [ "$nd" -ge 1 ] && [ "$nd" -le 31 ] && break
+    echo "周期起始日不合法：$nd，应为 1–31 号"
+  done
+  while true; do
+    read -r -p "超限模式（throttle 限速 / block 阻断，默认 throttle）： " nl || return 0
+    [ -z "$nl" ] && nl="throttle"
+    case "$(printf '%s' "$nl" | tr '[:upper:]' '[:lower:]')" in
+      throttle|tc|限速|tc限速) TRAFFIC_LIMIT_MODE="throttle"; break ;;
+      block|阻断) TRAFFIC_LIMIT_MODE="block"; break ;;
+      *) echo "超限模式不对：$nl，应为 throttle（限速）或 block（阻断）" ;;
+    esac
+  done
+  while true; do
+    read -r -p "TC 限速值（默认 125K，约 1 Mbps）： " nt || return 0
+    [ -z "$nt" ] && nt="125K"
+    valid_rate "$nt" || { echo "TC 限速值格式不对：$nt（应为数字 + 可选 K/M/G，例如 125K、1M）"; continue; }
+    if [ "$TRAFFIC_LIMIT_MODE" = "throttle" ] && [ "$nt" = "0" ]; then
+      echo "TC 限速模式下限速值不能为 0（0 = 不限速，等于没限制），请重填。"
+      continue
+    fi
+    break
+  done
+  if [ -z "${HOST:-}" ]; then HOST="$(detect_public_ip)"; fi
+  if [ ! -s "$PSK_FILE" ]; then
+    mkdir -p "$CFG_DIR"
+    if command -v openssl >/dev/null 2>&1; then openssl rand -hex 32 > "$PSK_FILE";
+    else od -An -tx1 -N 32 /dev/urandom | tr -d ' \n' > "$PSK_FILE"; fi
+    chmod 600 "$PSK_FILE"
+  fi
+  PORT="$np"; NAME="$nm"; TRAFFIC_QUOTA="$nq"; TRAFFIC_START_DAY="$nd"; TRAFFIC_THROTTLE_RATE="$nt"
+  local dom
+  read -r -p "域名（留空跳过；DNS 须先指到本机、80 端口空闲）： " dom || dom=""
+  local summary="添加节点：端口 $PORT，节点名 $NAME，限额 $TRAFFIC_QUOTA，起始日 $TRAFFIC_START_DAY 日，超限 $(traffic_limit_label)"
+  [ -n "$dom" ] && summary="$summary，域名 $dom"
+  if apply_config "$summary"; then
+    if [ -n "$dom" ]; then
+      if ! setup_domain "$dom"; then
+        echo "域名设置失败（$dom），节点已建好；域名可稍后在载入预设里再设，或用 mmx --setup-domain $dom。"
+        load_config
+      fi
+    fi
+  fi
+}
+
+# 3) 编辑节点：先显示当前启动命令，再按项改；改完校验，写回配置，
 #    重载 + 重启，重启失败自动回滚。第 11 项是流量设置（统计模式/周期/
 #    起始日/限制模式/限额/TC 限速值 + 查看流量），第 12 项是掩护流量档位，
 #    第 13 项是域名白名单（off 关 / google 只放行谷歌系域名）。
@@ -1012,7 +1308,7 @@ edit_params() {
   while true; do
     load_config
     echo ""
-    echo "--- 修改节点参数 ---"
+    echo "--- 编辑节点 ---"
     echo "当前启动命令："
     if [ -f "$UNIT_FILE" ]; then grep '^ExecStart=' "$UNIT_FILE" | sed 's/^ExecStart=//'; else echo "（服务文件不存在，请重装）"; fi
     echo "1) 端口（当前 $PORT）"
@@ -1151,33 +1447,88 @@ edit_params() {
   done
 }
 
-# 9) 卸载：停服务、删服务文件、删程序、删菜单命令、删配置（含密钥）；BBR 设置保留。
+# 4) 删除节点：停服务，删节点配置（含密钥、流量统计）；程序和菜单保留，
+#    之后可用“添加节点”重新建节点。和卸载不同：卸载连程序和菜单一起删。
+delete_node() {
+  load_config
+  if [ ! -f "$CFG_FILE" ]; then
+    echo "没有节点配置，不用删除。"
+    return 0
+  fi
+  echo "删除节点将停止服务并删除节点配置（含密钥、流量统计），程序和菜单保留，之后可用“添加节点”重新建节点。"
+  local yn
+  read -r -p "确认删除吗？输入 y 确认： " yn || return 0
+  case "$yn" in y|Y) ;; *) echo "已取消。"; return 0;; esac
+  systemctl stop mmx-server 2>/dev/null || true
+  rm -f "$CFG_FILE" "$PSK_FILE" "$CFG_DIR/traffic.json"
+  echo "节点已删除。"
+}
+
+# 10) 卸载：停服务、删服务文件、删程序、删菜单命令（mmx + mm）、删配置（含密钥）、
+#    删本域名的 Let's Encrypt 证书 + 续期 hook、删 BBR 配置并还原内核设置、删备份文件；不留残留。
+#    （端口 80 没有 ufw 规则可删：安装时只放行 $PORT/tcp，certbot standalone 校验
+#    只检查 80 空闲、不开防火墙规则。）
 uninstall() {
   load_config
-  echo "要卸载 mm-x 服务端，将删除：服务 mmx-server、程序 $SERVER_BIN、菜单命令 $BIN_DIR/$MYNAME、配置 $CFG_DIR（含密钥）。"
-  echo "BBR 内核设置会保留（对系统无害）。"
+  local le_dir="$ROOT/etc/letsencrypt"
+  local bbr_conf="$ROOT/etc/sysctl.d/99-mmx-bbr.conf"
+  local bbr_removed=0
+  echo "要卸载 mm-x 服务端，将删除："
+  echo "  服务 mmx-server（停用并删除服务文件）"
+  echo "  程序 $SERVER_BIN、菜单命令 $BIN_DIR/mmx 和 $BIN_DIR/mm"
+  echo "  配置 $CFG_DIR（含密钥、流量统计）"
+  echo "  备份：$BIN_DIR/mmx.bak-preset、$BIN_DIR/mmx*.bak、$BIN_DIR/mm.bak、$UNIT_FILE.bak、/tmp/mmx-server.bak-*"
+  if [ -n "$TLS_DOMAIN" ]; then
+    echo "  Let's Encrypt 证书（仅域名 $TLS_DOMAIN）：$le_dir/live/$TLS_DOMAIN、$le_dir/archive/$TLS_DOMAIN、$le_dir/renewal/$TLS_DOMAIN.conf"
+    echo "  续期 hook：$le_dir/renewal-hooks/deploy/restart-mmx-server.sh"
+  fi
+  if [ -f "$bbr_conf" ]; then
+    echo "  BBR 配置 $bbr_conf，并把内核拥塞算法还原为 cubic、队列算法还原为 pfifo_fast"
+  fi
+  if [ -n "$PORT" ]; then echo "  防火墙放行规则：ufw $PORT/tcp"; fi
   local yn
   read -r -p "确认卸载吗？输入 y 确认： " yn || return 0
   case "$yn" in y|Y) ;; *) echo "已取消。"; return 0;; esac
   systemctl stop mmx-server 2>/dev/null || true
   systemctl disable mmx-server 2>/dev/null || true
-  rm -f "$UNIT_FILE"
+  rm -f "$UNIT_FILE" "$UNIT_FILE.bak"
   systemctl daemon-reload 2>/dev/null || true
   if command -v ufw >/dev/null 2>&1 && [ -n "$PORT" ]; then ufw delete allow "$PORT/tcp" >/dev/null 2>&1 || true; fi
-  rm -f "$SERVER_BIN" "$BIN_DIR/$MYNAME"
+  rm -f "$SERVER_BIN" "$BIN_DIR/mmx" "$BIN_DIR/mm"
+  rm -f "$BIN_DIR/mmx.bak-preset" "$BIN_DIR"/mmx*.bak "$BIN_DIR"/mm.bak
   if [ -n "$CFG_DIR" ] && [ "$CFG_DIR" != "/" ] && [ "$CFG_DIR" != "/etc" ]; then rm -rf "$CFG_DIR"; fi
-  echo "已卸载。"
+  if [ -n "$TLS_DOMAIN" ]; then
+    rm -rf "$le_dir/live/$TLS_DOMAIN" "$le_dir/archive/$TLS_DOMAIN"
+    rm -f "$le_dir/renewal/$TLS_DOMAIN.conf"
+  fi
+  rm -f "$le_dir/renewal-hooks/deploy/restart-mmx-server.sh"
+  if [ -f "$bbr_conf" ]; then
+    rm -f "$bbr_conf"
+    sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
+    sysctl -w net.core.default_qdisc=pfifo_fast >/dev/null 2>&1 || true
+    bbr_removed=1
+  fi
+  rm -f /tmp/mmx-server.bak-*
+  echo "已卸载，无残留：服务、程序、菜单命令（mmx/mm）、配置、备份文件已删除。"
+  if [ -n "$TLS_DOMAIN" ]; then echo "域名 $TLS_DOMAIN 的 Let's Encrypt 证书和续期 hook 已删除。"; fi
+  if [ "$bbr_removed" = "1" ]; then echo "BBR 配置已删除，内核拥塞算法已还原为 cubic、队列算法已还原为 pfifo_fast。"; fi
   exit 0
 }
 
 main() {
   if [ "$(id -u)" -ne 0 ]; then echo "请用 sudo 运行：sudo $MYNAME"; exit 1; fi
-  # 隐藏用法：部署脚本装完后按配置写服务文件；只打印链接；只打印 TLS 指纹；只打印流量统计；直接载入预设
+  # 隐藏用法：部署脚本装完后按配置写服务文件；只打印链接；只打印 TLS 指纹；只打印流量统计；直接载入预设；一键设置域名
   if [ "${1:-}" = "--write-service" ]; then load_config; write_service; exit 0; fi
   if [ "${1:-}" = "--show-link" ]; then show_link "${2:-opaque}"; exit 0; fi
   if [ "${1:-}" = "--show-pin" ]; then show_pin; exit 0; fi
   if [ "${1:-}" = "--show-traffic" ]; then show_traffic; exit 0; fi
   if [ "${1:-}" = "--preset" ]; then load_config; apply_preset "${2:-}" || exit 1; exit 0; fi
+  if [ "${1:-}" = "--setup-domain" ]; then load_config; setup_domain "${2:-}" || exit 1; exit 0; fi
+  # 菜单界面统一绿色；退出（正常 / Ctrl-C）时复位终端颜色。
+  # 放在隐藏用法之后：非交互调用（--show-link / --preset / --setup-domain 等）
+  # 的输出里不能带颜色码，否则部署脚本抓到的链接会被污染。
+  printf '\033[32m'
+  trap 'printf "\033[0m"' EXIT
   while true; do
     load_config
     echo ""
@@ -1188,31 +1539,31 @@ main() {
     if systemctl is-active --quiet mmx-server 2>/dev/null; then
       echo "服务：正在运行　端口：${PORT:-?}　限速：${RATE:-?}　突发：${BURST:-?}　回退：${FALLBACK:-?}　TLS：$tls_desc"
     else
-      echo "服务：未运行（用第 3 项重启，或看第 6 项日志）　端口：${PORT:-?}　限速：${RATE:-?}"
+      echo "服务：未运行（用第 7 项重启，或看第 9 项日志）　端口：${PORT:-?}　限速：${RATE:-?}"
     fi
-    echo "1) 显示协议链接"
-    echo "2) 查看服务状态"
-    echo "3) 重启服务"
-    echo "4) 更换密钥"
-    echo "5) 修改限速"
-    echo "6) 查看最近日志"
-    echo "7) 诱饵回退 / TLS 设置"
-    echo "8) 修改节点参数"
-    echo "9) 载入预设"
+    echo "1) 添加节点"
+    echo "2) 载入预设"
+    echo "3) 编辑节点"
+    echo "4) 删除节点"
+    echo "5) 查看协议"
+    echo "6) 服务状态"
+    echo "7) 重启服务"
+    echo "8) 修改限速"
+    echo "9) 查看日志"
     echo "10) 卸载"
     echo "11) 退出"
     local c
     read -r -p "选一项： " c || exit 0
     case "$c" in
-      1) show_link ;;
-      2) show_status ;;
-      3) restart_svc ;;
-      4) rotate_key ;;
-      5) change_rate ;;
-      6) show_logs ;;
-      7) tls_menu ;;
-      8) edit_params ;;
-      9) preset_menu ;;
+      1) add_node ;;
+      2) preset_menu ;;
+      3) edit_params ;;
+      4) delete_node ;;
+      5) show_link ;;
+      6) show_status ;;
+      7) restart_svc ;;
+      8) change_rate ;;
+      9) show_logs ;;
       10) uninstall ;;
       11|"") exit 0 ;;
       *) echo "没有这个选项" ;;
@@ -1265,7 +1616,7 @@ echo "程序文件已更新（服务端二进制、管理菜单、服务文件�
 echo "端口：$PORT（不变）；限速：$RATE；TLS：$TLS_MODE_DESC；节点名：$NAME"
 echo "密钥文件：$PSK_FILE（未变）；配置文件：$CFG_FILE（未动）"
 echo "想改节点参数用 mmx 菜单；想彻底重装节点请加 --reinstall。"
-echo "服务状态：mm 菜单第 2 项，或 systemctl status mmx-server；日志：mm 菜单第 6 项，或 journalctl -u mmx-server -f"
+echo "服务状态：mm 菜单第 6 项，或 systemctl status mmx-server；日志：mm 菜单第 9 项，或 journalctl -u mmx-server -f"
 else
 echo ""
 echo "== 安装完成 =="
@@ -1273,13 +1624,26 @@ echo "监听端口：$PORT"
 echo "限速上限：$RATE（0 = 不限速），突发额度：$BURST"
 echo "回退模式：$FALLBACK；TLS：$TLS_MODE_DESC"
 if [ "$TRAFFIC_QUOTA" = "0" ]; then
-  echo "流量统计：不限额（只统计，不限制）；想限制去 mm 菜单第 8 项 → 流量设置"
+  echo "流量统计：不限额（只统计，不限制）；想限制去 mm 菜单第 3 项 → 流量设置"
 else
-  echo "流量统计：限额 $TRAFFIC_QUOTA，超限后 $TRAFFIC_LIMIT_MODE；查看用量去 mm 菜单第 8 项 → 流量设置 → 查看流量"
+  echo "流量统计：限额 $TRAFFIC_QUOTA，超限后 $TRAFFIC_LIMIT_MODE；查看用量去 mm 菜单第 3 项 → 流量设置 → 查看流量"
 fi
-echo "密钥文件：$PSK_FILE（重装不换密钥；轮换密钥：mm 菜单第 4 项，24 小时内新旧密钥都能用）"
+echo "密钥文件：$PSK_FILE（重装不换密钥；换密钥请直接改此文件，服务端自动识别，24 小时内新旧密钥都能用）"
 echo "配置文件：$CFG_FILE（菜单改参数就改这个文件）"
-echo "服务状态：mm 菜单第 2 项，或 systemctl status mmx-server；日志：mm 菜单第 6 项，或 journalctl -u mmx-server -f"
+echo "服务状态：mm 菜单第 6 项，或 systemctl status mmx-server；日志：mm 菜单第 9 项，或 journalctl -u mmx-server -f"
 echo ""
-echo "输入 mmx 打开管理菜单，在菜单第 1 项查看协议链接（粘贴到 mm-x 客户端就能用，绝不要分享给第二个人）。"
+echo "输入 mmx 打开管理菜单，在菜单第 5 项查看协议（粘贴到 mm-x 客户端就能用，绝不要分享给第二个人）。"
+fi
+
+# --domain：一键申请证书并切真 TLS（只在全新安装/--reinstall 时跑；
+# 更新模式上面已经忽略该参数，不走这里）。失败也不影响上面装好的自签服务。
+if [ -n "${DOMAIN_SETUP:-}" ] && [ "$UPDATE_ONLY" = "0" ]; then
+echo ""
+echo "== 一键设置域名 $DOMAIN_SETUP =="
+if "$BIN_DIR/mmx" --setup-domain "$DOMAIN_SETUP"; then
+  echo "域名已设置：真 TLS（$DOMAIN_SETUP），新链接见上面（旧链接已失效，请更新客户端）。"
+else
+  echo "域名设置失败：服务仍用自签 TLS 继续运行（见上面的报错）；之后可用 mmx 菜单第 3 项（编辑节点）→ 第 10 子项重试。"
+  exit 1
+fi
 fi
