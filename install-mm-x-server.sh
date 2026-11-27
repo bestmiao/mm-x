@@ -18,7 +18,7 @@
 #   旧密钥靠服务端的 24 小时宽限期继续用）；默认开 BBR（开不了只警告）；放行防火墙端口；
 #   写 /etc/mmx/config（全部参数都在这里，菜单改参数就改这个文件）；写服务文件
 #   （systemd 用单元文件，OpenRC/Alpine 用 /etc/init.d/mmx-server；开机自启、崩溃自动重启）。
-# 安装完不打印 mmx:// 链接——链接在 mm 菜单第 5 项里看。
+# 安装完不打印 mmx:// 链接——链接在 mmx 菜单第 5 项里看。
 # 再跑一次本脚本：默认只更新程序文件（服务端二进制、管理菜单、服务文件），
 # 节点配置（端口/密钥/TLS/流量设置）原样保留，不会重置；彻底重装节点（换端口/
 # 重置配置）必须显式加 --reinstall（交互终端里还会再确认一次，默认不重装）。
@@ -116,7 +116,7 @@ WHITELIST_FILE=""
 ALLOW_IPS=()
 ALLOWLIST_FILE=""
 # 流量统计与限额（全服务总量）：默认不限额（只统计，不限制），
-# 不改变现有行为；想限制时用下面 6 个参数或 mm 菜单第 3 项（编辑节点）里的流量设置。
+# 不改变现有行为；想限制时用下面 6 个参数或 mmx 菜单第 3 项（编辑节点）里的流量设置。
 TRAFFIC_MODE="total"
 TRAFFIC_PERIOD="monthly"
 TRAFFIC_START_DAY="1"
@@ -677,6 +677,45 @@ svc_stop_cmd() {
 # 装 certbot 的命令（提示文字用）
 certbot_install_cmd() {
   if [ "$INIT_SYS" = "openrc" ]; then echo "apk add certbot"; else echo "apt install certbot -y"; fi
+}
+
+# BBR：系统调优，节点用。开不了只警告，绝不因此失败（测试模式跳过）。
+# （和部署脚本里的同名函数各一份，菜单是独立脚本，改动时两边同步。）
+enable_bbr() {
+  echo "== 开启 BBR =="
+  if [ -n "${MMX_TEST_ROOT:-}" ]; then
+    echo "测试模式：跳过 BBR"
+    return 0
+  fi
+  local BBR_OK=0
+  if sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null && sysctl -w net.core.default_qdisc=fq 2>/dev/null; then
+    if [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" = "bbr" ]; then
+      BBR_OK=1
+      mkdir -p /etc/sysctl.d
+      printf 'net.ipv4.tcp_congestion_control = bbr\nnet.core.default_qdisc = fq\n' > /etc/sysctl.d/99-mmx-bbr.conf
+    fi
+  fi
+  if [ "$BBR_OK" -eq 1 ]; then
+    echo "BBR 已开启"
+  else
+    echo "警告：BBR 没开成（内核不支持或没有权限），服务端照常运行，只是少了 BBR 的平滑效果"
+  fi
+}
+
+# 防火墙放行端口：有哪个工具用哪个，都没有就只提醒。
+# （和部署脚本里的同名函数各一份，菜单是独立脚本，改动时两边同步。）
+open_firewall_port() {
+  echo "== 防火墙放行 $PORT/tcp =="
+  if command -v ufw >/dev/null 2>&1; then
+    ufw allow "$PORT/tcp" >/dev/null 2>&1 || echo "警告：ufw 放行失败，请手动放行 $PORT/tcp"
+    echo "已用 ufw 放行 $PORT/tcp"
+  elif command -v firewall-cmd >/dev/null 2>&1; then
+    firewall-cmd --add-port="$PORT/tcp" --permanent >/dev/null 2>&1 || echo "警告：firewalld 放行失败，请手动放行 $PORT/tcp"
+    firewall-cmd --reload >/dev/null 2>&1 || true
+    echo "已用 firewalld 放行 $PORT/tcp"
+  else
+    echo "警告：没找到 ufw/firewall-cmd，请在云服务商的安全组 / 防火墙里手动放行 $PORT/tcp，否则连不上"
+  fi
 }
 
 # 默认值（配置文件缺失时用；老配置没有流量字段时也按这些默认走）
@@ -1908,9 +1947,7 @@ main() {
 main "$@"
 MM_MENU_EOF
 chmod +x "$BIN_DIR/mmx"
-# 兼容旧习惯：mm 仍可用（软链接到 mmx）
-ln -sf "$BIN_DIR/mmx" "$BIN_DIR/mm"
-echo "管理菜单已安装：$BIN_DIR/mmx（输入 mmx 呼出，旧的 mm 也能用）"
+echo "管理菜单已安装：$BIN_DIR/mmx（输入 mmx 呼出）"
 
 # 9) 服务文件：按配置文件生成（菜单改参数也是同一份逻辑），开机自启、崩溃自动重启
 #    systemd 写单元文件，OpenRC 写 /etc/init.d/mmx-server。
@@ -1953,7 +1990,7 @@ echo "程序文件已更新（服务端二进制、管理菜单、服务文件�
 echo "端口：$PORT（不变）；限速：$RATE；TLS：$TLS_MODE_DESC；节点名：$NAME"
 echo "密钥文件：$PSK_FILE（未变）；配置文件：$CFG_FILE（未动）"
 echo "想改节点参数用 mmx 菜单；想彻底重装节点请加 --reinstall。"
-echo "服务状态：mm 菜单第 6 项，或 $(svc_status_cmd)；日志：mm 菜单第 9 项，或 $(svc_log_follow_cmd)"
+echo "服务状态：mmx 菜单第 6 项，或 $(svc_status_cmd)；日志：mmx 菜单第 9 项，或 $(svc_log_follow_cmd)"
 elif [ "$FRESH_NO_NODE" = "1" ]; then
 echo ""
 echo "== 安装完成（只装了程序，未创建节点） =="
@@ -1971,13 +2008,13 @@ echo "监听端口：$PORT"
 echo "限速上限：$RATE（0 = 不限速），突发额度：$BURST"
 echo "回退模式：$FALLBACK；TLS：$TLS_MODE_DESC"
 if [ "$TRAFFIC_QUOTA" = "0" ]; then
-  echo "流量统计：不限额（只统计，不限制）；想限制去 mm 菜单第 3 项 → 流量设置"
+  echo "流量统计：不限额（只统计，不限制）；想限制去 mmx 菜单第 3 项 → 流量设置"
 else
-  echo "流量统计：限额 $TRAFFIC_QUOTA，超限后 $TRAFFIC_LIMIT_MODE；查看用量去 mm 菜单第 3 项 → 流量设置 → 查看流量"
+  echo "流量统计：限额 $TRAFFIC_QUOTA，超限后 $TRAFFIC_LIMIT_MODE；查看用量去 mmx 菜单第 3 项 → 流量设置 → 查看流量"
 fi
 echo "密钥文件：$PSK_FILE（重装不换密钥；换密钥请直接改此文件，服务端自动识别，24 小时内新旧密钥都能用）"
 echo "配置文件：$CFG_FILE（菜单改参数就改这个文件）"
-echo "服务状态：mm 菜单第 6 项，或 $(svc_status_cmd)；日志：mm 菜单第 9 项，或 $(svc_log_follow_cmd)"
+echo "服务状态：mmx 菜单第 6 项，或 $(svc_status_cmd)；日志：mmx 菜单第 9 项，或 $(svc_log_follow_cmd)"
 echo ""
 echo "输入 mmx 打开管理菜单，在菜单第 5 项查看节点（粘贴到 mm-x 客户端就能用，绝不要分享给第二个人）。"
 fi

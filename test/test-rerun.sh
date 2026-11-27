@@ -72,7 +72,7 @@ grep -q "已忽略" "$TEST_ROOT/deploy-fresh.log" && ok "全新安装输出说�
 grep -q "输入 mmx 打开菜单添加节点" "$TEST_ROOT/deploy-fresh.log" && ok "全新安装提示进菜单加节点" || bad "全新安装提示不对"
 ! grep -q "mmx://" "$TEST_ROOT/deploy-fresh.log" && ok "全新安装输出里没有链接" || bad "全新安装输出里有链接"
 [ -x "$TEST_ROOT/usr/local/bin/mmx-server" ] && ok "全新安装后二进制已装" || bad "全新安装后二进制没装"
-[ -x "$TEST_ROOT/usr/local/bin/mm" ] && ok "全新安装后菜单已装" || bad "全新安装后菜单没装"
+[ -x "$TEST_ROOT/usr/local/bin/mmx" ] && ok "全新安装后菜单已装" || bad "全新安装后菜单没装"
 [ ! -e "$CFG" ] && ok "全新安装不写配置文件" || bad "全新安装写了配置文件（应该不建节点）"
 [ ! -e "$TEST_ROOT/etc/mmx/psk" ] && ok "全新安装不生成密钥" || bad "全新安装生成了密钥（应该不建节点）"
 [ ! -e "$UNIT" ] && ok "全新安装不写服务文件" || bad "全新安装写了服务文件（应该不建节点）"

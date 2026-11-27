@@ -1,6 +1,6 @@
 #!/bin/bash
-# mm-x 部署脚本 + mm 菜单测试：在沙箱里用替身命令模拟 systemd，
-# 验证：装完不打印链接、mm 菜单每项能跑通、改参数重启失败会回滚、流量设置能跑通。
+# mm-x 部署脚本 + mmx 菜单测试：在沙箱里用替身命令模拟 systemd，
+# 验证：装完不打印链接、mmx 菜单每项能跑通、改参数重启失败会回滚、流量设置能跑通。
 # 用法：bash test/test-deploy.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -10,7 +10,7 @@ GO=~/workspace/_build/go/bin/go
 TEST_ROOT=/tmp/mmx-deploy-test
 STUB_BIN="$TEST_ROOT/stubs"
 SRC_DIR="$TEST_ROOT/src"
-MM_BIN="$TEST_ROOT/usr/local/bin/mm"
+MM_BIN="$TEST_ROOT/usr/local/bin/mmx"
 CFG="$TEST_ROOT/etc/mmx/config"
 UNIT="$TEST_ROOT/etc/systemd/system/mmx-server.service"
 
@@ -199,7 +199,7 @@ if grep -q "mmx://" "$TEST_ROOT/deploy.log"; then bad "部署输出里打印了 
 grep -q "只装程序，不建节点" "$TEST_ROOT/deploy.log" && ok "部署输出说明只装程序、不建节点" || bad "部署输出没说只装程序"
 grep -q "已忽略" "$TEST_ROOT/deploy.log" && ok "部署输出说明安装参数（--port/--name）已忽略" || bad "部署输出没说安装参数已忽略"
 grep -q "输入 mmx 打开菜单添加节点" "$TEST_ROOT/deploy.log" && ok "部署完成提示让用户输入 mmx 打开菜单添加节点" || bad "部署完成提示没提 mmx 菜单"
-[ -x "$MM_BIN" ] && ok "/usr/local/bin/mm 存在且可执行" || bad "/usr/local/bin/mm 不存在或不可执行"
+[ -x "$MM_BIN" ] && ok "/usr/local/bin/mmx 存在且可执行" || bad "/usr/local/bin/mmx 不存在或不可执行"
 grep -Fq "printf '\033[32m'" "$MM_BIN" && ok "菜单脚本含绿色 printf（交互菜单统一绿色）" || bad "菜单脚本没有绿色 printf"
 grep -Fq "trap 'printf \"\033[0m\"' EXIT" "$MM_BIN" && ok "菜单脚本含 EXIT 复位 trap（退出时恢复终端颜色）" || bad "菜单脚本没有 EXIT 复位 trap"
 [ -x "$TEST_ROOT/usr/local/bin/mmx-server" ] && ok "mmx-server 二进制已安装" || bad "mmx-server 二进制没装上"
@@ -382,7 +382,7 @@ has "$CFG" "^TRAFFIC_START_DAY=15$" && ok "非法起始日后配置没变" || ba
 run_mm '3\n11\n2\nfoo\n0\n0\n11\n' | grep -q "统计模式不对" && ok "统计模式 foo 被拒绝" || bad "统计模式 foo 没被拒绝"
 run_mm '3\n11\n8\ny\n0\n0\n11\n' | grep -q "已清零" && ok "清零本周期流量提示正常" || bad "清零提示不对"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "清零后服务仍在运行" || bad "清零后服务停了"
-"$MM_BIN" --show-traffic 2>/dev/null | grep -q "流量统计（本周期）" && ok "隐藏用法 mm --show-traffic 能显示流量统计" || bad "mm --show-traffic 显示不对"
+"$MM_BIN" --show-traffic 2>/dev/null | grep -q "流量统计（本周期）" && ok "隐藏用法 mmx --show-traffic 能显示流量统计" || bad "mmx --show-traffic 显示不对"
 
 note "测试14b：菜单第 3 项 → 第 12 项掩护流量（改档位/非法输入/恢复）"
 run_mm '3\n12\nhigh\n0\n11\n' | grep -q "掩护流量改为 high" && ok "改掩护档位提示正常" || bad "改掩护档位提示不对"
@@ -569,7 +569,7 @@ printf '%s' "$UNINSTALL_OUT" | grep -q "Let's Encrypt" && ok "卸载确认里列
 [ ! -e "$UNIT" ] && ok "卸载后服务文件已删除" || bad "卸载后服务文件还在"
 [ ! -e "$UNIT.bak" ] && ok "卸载后服务文件备份已删除" || bad "卸载后服务文件备份还在"
 [ ! -e "$TEST_ROOT/usr/local/bin/mmx-server" ] && ok "卸载后程序已删除" || bad "卸载后程序还在"
-[ ! -e "$MM_BIN" ] && ok "卸载后菜单命令 mm 已删除" || bad "卸载后菜单命令 mm 还在"
+[ ! -e "$MM_BIN" ] && ok "卸载后菜单命令 mmx 已删除" || bad "卸载后菜单命令 mm 还在"
 [ ! -e "$TEST_ROOT/usr/local/bin/mmx" ] && ok "卸载后菜单命令 mmx 已删除" || bad "卸载后菜单命令 mmx 还在"
 [ ! -e "$TEST_ROOT/usr/local/bin/mmx.bak-preset" ] && [ ! -e "$TEST_ROOT/usr/local/bin/mmx-server.bak" ] && [ ! -e "$TEST_ROOT/usr/local/bin/mm.bak" ] && ok "卸载后菜单备份文件已删除" || bad "卸载后菜单备份文件还在"
 [ ! -d "$TEST_ROOT/etc/mmx" ] && ok "卸载后配置目录已删除" || bad "卸载后配置目录还在"
