@@ -182,11 +182,11 @@ bash "$SRC_DIR/install-mm-x-server.sh" --port 18200 < /dev/null > "$TEST_ROOT/de
 run_mm() { printf '%b' "$1" | "$MM_BIN" > "$TEST_ROOT/mm-out.txt" 2>&1; cat "$TEST_ROOT/mm-out.txt"; }
 
 note "测试1：选 XHTTP（Reality）建出节点"
-# 菜单1 → 协议2(XHTTP) → 模式1(Reality) → 地区4(美国) → 端口18200 → 分流默认开 → 名 XHTTP节点 → 流量全默认 → 退出
-run_mm '1\n2\n1\n4\n18200\n\nXHTTP节点\n\n1\n\n\n10\n' | grep -q "XHTTP 节点已添加" && ok "XHTTP 节点添加成功" || bad "XHTTP 节点添加失败（见 mm-out.txt）"
+# 菜单1 → 协议2(XHTTP) → 模式1(Reality) → 地区4(美国) → 端口18200 → 分流默认开 → 流量全默认 → 退出
+run_mm '1\n2\n1\n4\n18200\n\n\n1\n\n\n10\n' | grep -q "XHTTP 节点已添加" && ok "XHTTP 节点添加成功" || bad "XHTTP 节点添加失败（见 mm-out.txt）"
 has "$CFG" "^PROTO=xhttp$" && ok "主配置 PROTO=xhttp" || bad "主配置 PROTO 不是 xhttp"
 has "$CFG" "^PORT=18200$" && ok "主配置端口 18200" || bad "主配置端口不对"
-( . "$CFG"; [ "$NAME" = "XHTTP节点" ] ) && ok "主配置节点名 XHTTP节点" || bad "主配置节点名不对"
+( . "$CFG"; [ "$NAME" = "$HOST" ] ) && ok "主配置节点名自动取服务器地址" || bad "主配置节点名不对"
 [ -f "$XRAY_CONF" ] && ok "Xray 状态文件已生成：/etc/mmx/xray.conf" || bad "Xray 状态文件没生成"
 has "$XRAY_CONF" "^XHTTP_MODE=reality$" && ok "xray.conf 模式 Reality" || bad "xray.conf 模式不对"
 has "$XRAY_CONF" "^XHTTP_REGION=us$" && ok "xray.conf 地区 us" || bad "xray.conf 地区不对"
@@ -228,8 +228,8 @@ run_mm '7\n10\n' | grep -q "重启成功" && ok "第 7 项重启 xray 成功" ||
 
 note "测试3：端口冲突——被别的服务占的端口拒绝重问，本服务的端口允许"
 echo "18299" > "$TEST_ROOT/ss-busy-ports"
-# 菜单1 → y(覆盖) → 协议3(ss2022) → 端口18299(被占) → 端口18201 → 名 ss节点 → 流量默认
-run_mm '1\ny\n3\n18299\n18201\nss节点\n\n1\n\n\n10\n' | grep -q "端口 18299 已被占用" && ok "被占端口 18299 被拒绝并提示" || bad "被占端口没被拒绝"
+# 菜单1 → y(覆盖) → 协议3(ss2022) → 端口18299(被占) → 端口18201 → 流量默认
+run_mm '1\ny\n3\n18299\n18201\n\n1\n\n\n10\n' | grep -q "端口 18299 已被占用" && ok "被占端口 18299 被拒绝并提示" || bad "被占端口没被拒绝"
 has "$CFG" "^PROTO=ss2022$" && ok "切到 ss2022 后 PROTO=ss2022" || bad "切到 ss2022 后 PROTO 不对"
 has "$CFG" "^PORT=18201$" && ok "ss2022 节点端口 18201（重问后）" || bad "ss2022 节点端口不对"
 [ "$(cat "$TEST_ROOT/xray-state" 2>/dev/null)" = "active" ] && ok "ss2022 节点 xray 在运行" || bad "ss2022 节点 xray 没运行"
@@ -250,8 +250,8 @@ jq -e '.inbounds[0].protocol == "shadowsocks" and .inbounds[0].port == 18201 and
 [ ! -e "$TEST_ROOT/etc/mmx/xhttp-split-b.json" ] && ok "切到 ss2022 后分离配置 B 已删" || bad "切到 ss2022 后分离配置 B 还在"
 
 note "测试5：切回 mmx——xray 停，mmx-server 起，链接是 mmx://"
-# 菜单1 → y(覆盖) → 协议1(mmx) → 端口18202 → 名 mmx节点 → 流量默认 → 域名/IP 2 → 退出
-run_mm '1\ny\n1\n18202\nmmx节点\n\n1\n\n\n2\n10\n' | grep -q "添加节点" && ok "切回 mmx 添加成功" || bad "切回 mmx 添加失败"
+# 菜单1 → y(覆盖) → 协议1(mmx) → 端口18202 → 流量默认 → 域名/IP 2 → 退出
+run_mm '1\ny\n1\n18202\n\n1\n\n\n2\n10\n' | grep -q "添加节点" && ok "切回 mmx 添加成功" || bad "切回 mmx 添加失败"
 has "$CFG" "^PROTO=mmx$" && ok "切回 mmx 后 PROTO=mmx" || bad "切回 mmx 后 PROTO 不对"
 has "$CFG" "^PORT=18202$" && ok "mmx 节点端口 18202" || bad "mmx 节点端口不对"
 [ "$(cat "$TEST_ROOT/xray-state" 2>/dev/null)" != "active" ] && ok "切回 mmx 后 xray 已停" || bad "切回 mmx 后 xray 还在运行"
@@ -261,7 +261,7 @@ printf '%s' "$MMX_OUT" | grep -q "mmx://" && ok "mmx 节点第 5 项显示 mmx:/
 ! printf '%s' "$MMX_OUT" | grep -q "vless://\|ss://" && ok "mmx 节点不显示 vless/ss 链接" || bad "mmx 节点混进了 Xray 链接"
 
 note "测试6：再切回 XHTTP——mmx-server 停，xray 起"
-run_mm '1\ny\n2\n1\n1\n18203\n\nXHTTP2\n\n1\n\n\n10\n' | grep -q "XHTTP 节点已添加" && ok "再切回 XHTTP 添加成功" || bad "再切回 XHTTP 添加失败"
+run_mm '1\ny\n2\n1\n1\n18203\n\n\n1\n\n\n10\n' | grep -q "XHTTP 节点已添加" && ok "再切回 XHTTP 添加成功" || bad "再切回 XHTTP 添加失败"
 has "$CFG" "^PROTO=xhttp$" && ok "再切回 XHTTP 后 PROTO=xhttp" || bad "再切回 XHTTP 后 PROTO 不对"
 [ "$(cat "$TEST_ROOT/xray-state" 2>/dev/null)" = "active" ] && ok "再切回 XHTTP 后 xray 在运行" || bad "再切回 XHTTP 后 xray 没运行"
 [ "$(cat "$TEST_ROOT/svc-state" 2>/dev/null)" != "active" ] && ok "再切回 XHTTP 后 mmx-server 已停" || bad "再切回 XHTTP 后 mmx-server 还在运行"
@@ -273,8 +273,8 @@ run_mm '4\ny\n10\n' | grep -q "节点已删除" && ok "先删除节点" || bad "
 [ ! -e "$XRAY_CONF" ] && ok "删除后 xray.conf 已删" || bad "删除后 xray.conf 还在"
 [ ! -e "$XRAY_CFG" ] && ok "删除后 Xray 配置已删" || bad "删除后 Xray 配置还在"
 [ "$(cat "$TEST_ROOT/xray-state" 2>/dev/null)" != "active" ] && ok "删除后 xray 已停" || bad "删除后 xray 还在运行"
-# 菜单1 → 协议2(XHTTP) → 模式1(Reality) → 地区4(美国) → 端口18204 → 分流默认 → 名 XHTTP白名单 → 流量默认 → 退出
-run_mm '1\n2\n1\n4\n18204\n\nXHTTP白名单\n\n1\n\n\n10\n' | grep -q "XHTTP 节点已添加" && ok "菜单 1 建出 XHTTP 节点" || bad "菜单 1 建 XHTTP 节点失败"
+# 菜单1 → 协议2(XHTTP) → 模式1(Reality) → 地区4(美国) → 端口18204 → 分流默认 → 流量默认 → 退出
+run_mm '1\n2\n1\n4\n18204\n\n\n1\n\n\n10\n' | grep -q "XHTTP 节点已添加" && ok "菜单 1 建出 XHTTP 节点" || bad "菜单 1 建 XHTTP 节点失败"
 has "$CFG" "^PROTO=xhttp$" && ok "新建节点 PROTO=xhttp" || bad "新建节点 PROTO 不对"
 has "$CFG" "^DOMAIN_WHITELIST=''$" && ok "新建节点白名单默认关" || bad "新建节点白名单默认不对"
 ! jq -e '.routing' "$XRAY_CFG" >/dev/null 2>&1 && ok "白名单关时 Xray 配置里没 routing" || bad "白名单关时 Xray 配置里有 routing"
@@ -303,7 +303,7 @@ has "$CFG" "^DOMAIN_WHITELIST=google$" && ok "再开后配置又是 google" || b
 
 note "测试8：谷歌服务开关（ss2022 节点）——白名单对 ss2022 也生效"
 # 当前是 XHTTP 节点，白名单开着；切到 ss2022（菜单 1），白名单跟着配置走
-run_mm '1\ny\n3\n18205\nss白名单\n\n1\n\n\n10\n' | grep -q "ss2022 节点已添加" && ok "菜单 1 切到 ss2022 成功" || bad "菜单 1 切 ss2022 失败"
+run_mm '1\ny\n3\n18205\n\n1\n\n\n10\n' | grep -q "ss2022 节点已添加" && ok "菜单 1 切到 ss2022 成功" || bad "菜单 1 切 ss2022 失败"
 has "$CFG" "^PROTO=ss2022$" && ok "切到 ss2022 后 PROTO=ss2022" || bad "切到 ss2022 后 PROTO 不对"
 has "$CFG" "^DOMAIN_WHITELIST=google$" && ok "切协议后白名单仍开着（配置跟着走）" || bad "切协议后白名单被关了"
 jq -e '.inbounds[0].protocol == "shadowsocks"' "$XRAY_CFG" >/dev/null 2>&1 && ok "ss2022 节点 Xray 配置是 Shadowsocks" || bad "ss2022 节点 Xray 配置不对"
@@ -324,8 +324,8 @@ has "$CFG" "^DOMAIN_WHITELIST=google$" && ok "再开后配置又是 google" || b
 jq -e '.routing.rules[0].domain[0] == "geosite:google"' "$XRAY_CFG" >/dev/null 2>&1 && ok "再开后 ss2022 路由回来了" || bad "再开后 ss2022 路由没回来"
 
 note "测试10：Xray 流量监视——假网卡计数，超限后 TC 限速"
-# 先把限额改成 1K（第3项→第11项→第6子项），方便超限
-run_mm '3\n11\n6\n1K\n0\n0\n10\n' | grep -q "限额改为 1K" && ok "限额改为 1K" || bad "改限额失败"
+# 先把限额改成 1K（第3项→第6项→第6子项），方便超限
+run_mm '3\n6\n6\n1K\n0\n0\n10\n' | grep -q "限额改为 1K" && ok "限额改为 1K" || bad "改限额失败"
 has "$CFG" "^TRAFFIC_QUOTA=1K$" && ok "配置限额已是 1K" || bad "配置限额不对"
 # 假网卡：test0，初始收/发各 1000 字节
 export XRAY_IFACE="test0"
@@ -359,15 +359,15 @@ jq -e '.in == 0 and .out == 0 and .enforced == ""' "$TEST_ROOT/etc/mmx/xray-traf
 
 note "测试11：编辑节点里 mmx 专属项对 Xray 节点有守卫"
 run_mm '3\n2\n0\n10\n' | grep -q "mmx 节点专属" && ok "第 2 项 rate 对 ss2022 节点被守卫" || bad "第 2 项 rate 没被守卫"
-run_mm '3\n10\n0\n10\n' | grep -q "mmx 节点专属" && ok "第 10 项 TLS 对 ss2022 节点被守卫" || bad "第 10 项 TLS 没被守卫"
-run_mm '3\n13\noff\n0\n10\n' | grep -q "域名白名单改为 关闭" && ok "第 13 项域名白名单对 ss2022 节点能改（不再守卫）" || bad "第 13 项域名白名单对 ss2022 节点改不了"
+run_mm '3\n5\n0\n10\n' | grep -q "mmx 节点专属" && ok "第 5 项 TLS 对 ss2022 节点被守卫" || bad "第 10 项 TLS 没被守卫"
+run_mm '3\n8\noff\n0\n10\n' | grep -q "域名白名单改为 关闭" && ok "第 8 项域名白名单对 ss2022 节点能改（不再守卫）" || bad "第 8 项域名白名单对 ss2022 节点改不了"
 has "$CFG" "^DOMAIN_WHITELIST=''$" && ok "改完白名单已关" || bad "改完白名单没关"
 ! jq -e '.routing' "$XRAY_CFG" >/dev/null 2>&1 && ok "白名单关后 ss2022 配置里没了 routing" || bad "白名单关后 ss2022 配置里还有 routing"
 has "$CFG" "^TRAFFIC_QUOTA=1K$" && ok "守卫没改配置（限额仍是 1K）" || bad "守卫后配置被改了"
 
 note "测试12：XHTTP TLS 模式（域名 + certbot 假证书）"
-# 菜单1 → y(覆盖) → 协议2(XHTTP) → 模式2(TLS) → 端口18206 → 域名 tls.example → 分流默认 → 名 TLS节点 → 流量默认 → 退出
-run_mm '1\ny\n2\n2\n18206\ntls.example\n\nTLS节点\n\n1\n\n\n10\n' | grep -q "XHTTP 节点已添加" && ok "XHTTP TLS 节点添加成功" || bad "XHTTP TLS 节点添加失败"
+# 菜单1 → y(覆盖) → 协议2(XHTTP) → 模式2(TLS) → 端口18206 → 域名 tls.example → 分流默认 → 流量默认 → 退出
+run_mm '1\ny\n2\n2\n18206\ntls.example\n\n\n1\n\n\n10\n' | grep -q "XHTTP 节点已添加" && ok "XHTTP TLS 节点添加成功" || bad "XHTTP TLS 节点添加失败"
 has "$XRAY_CONF" "^XHTTP_MODE=tls$" && ok "xray.conf 模式 TLS" || bad "xray.conf 模式不对"
 ( . "$XRAY_CONF"; [ "$XHTTP_SNI" = "tls.example" ] && [ -n "$XHTTP_CERT" ] && [ -n "$XHTTP_KEY" ] ) && ok "xray.conf 有 SNI 和证书路径" || bad "xray.conf 缺 SNI 或证书"
 [ -f "$TEST_ROOT/etc/letsencrypt/live/tls.example/fullchain.pem" ] && ok "假证书已生成" || bad "假证书没生成"
@@ -393,7 +393,7 @@ run_mm '4\ny\n10\n' | grep -q "节点已删除" && ok "删除节点提示正常"
 
 note "测试14：完全卸载清干净（含 Xray）"
 # 先建一个 ss2022 节点再卸载（验证卸载删自己装的 xray）
-run_mm '1\n3\n18207\nss卸载\n\n1\n\n\n10\n' | grep -q "ss2022 节点已添加" && ok "卸载前建好 ss2022 节点" || bad "卸载前建节点失败"
+run_mm '1\n3\n18207\n\n1\n\n\n10\n' | grep -q "ss2022 节点已添加" && ok "卸载前建好 ss2022 节点" || bad "卸载前建节点失败"
 run_mm '9\ny\n' | grep -q "已卸载" && ok "卸载提示正常" || bad "卸载提示不对"
 [ ! -e "$TEST_ROOT/etc/mmx" ] && ok "卸载后配置目录已删除" || bad "卸载后配置目录还在"
 [ ! -e "$XRAY_CFG" ] && ok "卸载后 Xray 配置已删除" || bad "卸载后 Xray 配置还在"
@@ -473,8 +473,8 @@ PATH="$ORC_PATH" bash "$OSRC/install-mm-x-server.sh" --port 18210 < /dev/null > 
 [ "$?" = 0 ] && ok "OpenRC 全新安装退出码 0" || bad "OpenRC 全新安装退出码非 0（见 $OROOT/deploy.log）"
 [ ! -e "$OROOT/etc/systemd/system/mmx-server.service" ] && ok "OpenRC 全新安装没写 systemd 单元" || bad "OpenRC 全新安装写了 systemd 单元"
 run_omm() { printf '%b' "$1" | PATH="$ORC_PATH" "$OMM" > "$OROOT/mm-out.txt" 2>&1; cat "$OROOT/mm-out.txt"; }
-# 菜单1 → 协议2(XHTTP) → 模式1(Reality) → 地区1(香港) → 端口18210 → 分流默认 → 名 ORCX → 流量默认 → 退出
-run_omm '1\n2\n1\n1\n18210\n\nORCX\n\n1\n\n\n10\n' | grep -q "XHTTP 节点已添加" && ok "OpenRC 下 XHTTP 节点添加成功" || bad "OpenRC 下 XHTTP 节点添加失败"
+# 菜单1 → 协议2(XHTTP) → 模式1(Reality) → 地区1(香港) → 端口18210 → 分流默认 → 流量默认 → 退出
+run_omm '1\n2\n1\n1\n18210\n\n\n1\n\n\n10\n' | grep -q "XHTTP 节点已添加" && ok "OpenRC 下 XHTTP 节点添加成功" || bad "OpenRC 下 XHTTP 节点添加失败"
 [ -f "$OXRAY_INIT" ] && ok "OpenRC 下 /etc/init.d/xray 已生成" || bad "OpenRC 下 /etc/init.d/xray 没生成"
 [ -x "$OXRAY_INIT" ] && ok "OpenRC 下 /etc/init.d/xray 可执行" || bad "OpenRC 下 /etc/init.d/xray 不可执行"
 head -1 "$OXRAY_INIT" | grep -q "#!/sbin/openrc-run" && ok "xray init 脚本第一行是 #!/sbin/openrc-run" || bad "xray init 脚本第一行不对"

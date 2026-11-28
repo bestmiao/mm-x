@@ -64,11 +64,11 @@ $GO build -o "$SRC_DIR/mmx-server-linux-amd64" ./cmd/mmx-server || { echo "编�
 ok "编译通过"
 cp install-mm-x-server.sh "$SRC_DIR/"
 
-note "测试1：全新安装（--name 测试节点）只装程序，不建节点"
-bash "$SRC_DIR/install-mm-x-server.sh" --name 测试节点 < /dev/null > "$TEST_ROOT/deploy-fresh.log" 2>&1
+note "测试1：全新安装（--port 18130）只装程序，不建节点"
+bash "$SRC_DIR/install-mm-x-server.sh" --port 18130 < /dev/null > "$TEST_ROOT/deploy-fresh.log" 2>&1
 [ "$?" = 0 ] && ok "全新安装退出码 0" || bad "全新安装退出码非 0（见 deploy-fresh.log）"
 grep -q "只装程序，不建节点" "$TEST_ROOT/deploy-fresh.log" && ok "全新安装输出说明只装程序、不建节点" || bad "全新安装输出没说只装程序"
-grep -q "已忽略" "$TEST_ROOT/deploy-fresh.log" && ok "全新安装输出说明 --name 已忽略" || bad "全新安装输出没说参数已忽略"
+grep -q "已忽略" "$TEST_ROOT/deploy-fresh.log" && ok "全新安装输出说明 --port 已忽略" || bad "全新安装输出没说参数已忽略"
 grep -q "输入 mmx 打开菜单添加节点" "$TEST_ROOT/deploy-fresh.log" && ok "全新安装提示进菜单加节点" || bad "全新安装提示不对"
 ! grep -q "mmx://" "$TEST_ROOT/deploy-fresh.log" && ok "全新安装输出里没有链接" || bad "全新安装输出里有链接"
 [ -x "$TEST_ROOT/usr/local/bin/mmx-server" ] && ok "全新安装后二进制已装" || bad "全新安装后二进制没装"
@@ -79,7 +79,7 @@ grep -q "输入 mmx 打开菜单添加节点" "$TEST_ROOT/deploy-fresh.log" && o
 [ ! -e "$TEST_ROOT/svc-state" ] && ok "全新安装后服务未启动" || bad "全新安装后服务被启动了"
 
 note "测试1b：用 --reinstall 建节点（默认端口 443），为后面的再跑测试准备状态"
-bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --name 测试节点 < /dev/null > "$TEST_ROOT/deploy-create.log" 2>&1
+bash "$SRC_DIR/install-mm-x-server.sh" --reinstall < /dev/null > "$TEST_ROOT/deploy-create.log" 2>&1
 [ "$?" = 0 ] && ok "--reinstall 建节点退出码 0" || bad "--reinstall 建节点退出码非 0（见 deploy-create.log）"
 has "$CFG" "^PORT=443$" && ok "--reinstall 建节点默认端口是 443" || bad "--reinstall 建节点默认端口不是 443"
 has "$UNIT" "0.0.0.0:443" && ok "服务文件监听 443" || bad "服务文件端口不对"
@@ -113,7 +113,7 @@ grep -q "已忽略 --domain" "$TEST_ROOT/deploy-rerun3.log" && ok "带 --domain 
 has "$CFG" "^TLS_AUTO=0$" && ! grep -q "tls-domain" "$UNIT" && ok "带 --domain 再跑后 TLS 仍是关的" || bad "带 --domain 再跑后 TLS 被改了"
 
 note "测试4：加 --reinstall 再跑，才按新参数重写配置（密钥仍保留）"
-bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 8443 --rate 100K --name 测试节点 < /dev/null > "$TEST_ROOT/deploy-reinstall.log" 2>&1
+bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 8443 --rate 100K < /dev/null > "$TEST_ROOT/deploy-reinstall.log" 2>&1
 [ "$?" = 0 ] && ok "--reinstall 退出码 0" || bad "--reinstall 退出码非 0（见 deploy-reinstall.log）"
 has "$CFG" "^PORT=8443$" && has "$CFG" "^RATE=100K$" && has "$UNIT" "0.0.0.0:8443" && ok "--reinstall 后端口/限速已按新参数重写" || bad "--reinstall 后配置没按新参数重写"
 [ "$(cat "$TEST_ROOT/etc/mmx/psk")" = "$PSK1" ] && ok "--reinstall 后密钥仍保留" || bad "--reinstall 后密钥被换了"

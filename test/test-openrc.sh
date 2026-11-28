@@ -239,7 +239,7 @@ note "测试0：干净 PATH 里确实没有 systemctl/journalctl/apt-get，但�
 [ -n "$(PATH="$OPENRC_PATH" command -v apk 2>/dev/null)" ] && ok "干净 PATH 里能找到 apk 替身" || bad "干净 PATH 里找不到 apk"
 
 note "测试1：跑部署脚本（--port 18130），应检测到 OpenRC；全新安装只装程序，不建节点"
-PATH="$OPENRC_PATH" bash "$SRC_DIR/install-mm-x-server.sh" --port 18130 --name 测试节点 < /dev/null > "$TEST_ROOT/deploy.log" 2>&1
+PATH="$OPENRC_PATH" bash "$SRC_DIR/install-mm-x-server.sh" --port 18130 < /dev/null > "$TEST_ROOT/deploy.log" 2>&1
 DEPLOY_CODE=$?
 [ "$DEPLOY_CODE" = 0 ] && ok "部署脚本退出码 0" || bad "部署脚本退出码 $DEPLOY_CODE（见 deploy.log）"
 ! grep -q "systemctl" "$TEST_ROOT/deploy.log" && ok "部署输出里没提 systemctl（全是 OpenRC 命令）" || bad "部署输出里还提 systemctl"
@@ -259,8 +259,8 @@ grep -q "输入 mmx 打开菜单添加节点" "$TEST_ROOT/deploy.log" && ok "部
 # 菜单调用辅助：喂给 mm 的输入（用干净 PATH 跑菜单）。
 run_mm() { printf '%b' "$1" | PATH="$OPENRC_PATH" "$MM_BIN" > "$TEST_ROOT/mm-out.txt" 2>&1; cat "$TEST_ROOT/mm-out.txt"; }
 
-note "测试1b：菜单第 1 项添加节点（端口 18130、节点名 测试节点、选 IP）建好节点"
-run_mm '1\n1\n18130\n测试节点\n\n1\n\n\n2\n10\n' | grep -q "用域名还是 IP" && ok "向导里问域名还是 IP（明确选，不是可选收尾）" || bad "向导里没问域名还是 IP"
+note "测试1b：菜单第 1 项添加节点（端口 18130、选 IP）建好节点"
+run_mm '1\n1\n18130\n\n1\n\n\n2\n10\n' | grep -q "用域名还是 IP" && ok "向导里问域名还是 IP（明确选，不是可选收尾）" || bad "向导里没问域名还是 IP"
 has "$CFG" "^PORT=18130$" && ok "配置文件端口 18130" || bad "配置文件端口不对"
 grep -q "add mmx-server default" "$TEST_ROOT/rc-update.log" && ok "加节点时 rc-update add mmx-server default（开机自启）" || bad "加节点时没调 rc-update add"
 grep -q "restart" "$TEST_ROOT/rc-service.log" && ok "加节点时调用了 rc-service restart" || bad "加节点时没调用 rc-service restart"
@@ -277,7 +277,7 @@ grep -Fq 'pidfile="/run/mmx-server.pid"' "$INIT_FILE" && ok "init 脚本有 pidf
 grep -q "command_background=true" "$INIT_FILE" && ok "init 脚本 command_background=true" || bad "init 脚本没有 command_background"
 # command_args 必须和 systemd 的 ExecStart 参数字节一致（只差二进制路径）：
 # 部署配置是端口 18130、不限速、回退 site、默认流量（total/月/1日/限速/0/125K）、掩护 low。
-EXPECTED_ARGS="--psk-file $TEST_ROOT/etc/mmx/psk --listen 0.0.0.0:18130 --rate 0 --burst 0 --name \"测试节点\" --fallback site --traffic-mode total --traffic-period monthly --traffic-start-day 1 --traffic-limit-mode throttle --traffic-quota 0 --traffic-throttle-rate 125K --traffic-file $TEST_ROOT/etc/mmx/traffic.json --cover-traffic low"
+EXPECTED_ARGS="--psk-file $TEST_ROOT/etc/mmx/psk --listen 0.0.0.0:18130 --rate 0 --burst 0 --name \"203.0.113.5\" --fallback site --traffic-mode total --traffic-period monthly --traffic-start-day 1 --traffic-limit-mode throttle --traffic-quota 0 --traffic-throttle-rate 125K --traffic-file $TEST_ROOT/etc/mmx/traffic.json --cover-traffic low"
 INIT_ARGS="$(grep '^command_args=' "$INIT_FILE" | sed 's/^command_args="//; s/"$//; s/\\"/"/g')"
 [ "$INIT_ARGS" = "$EXPECTED_ARGS" ] && ok "init 脚本 command_args 和 systemd ExecStart 参数字节一致" || bad "init 脚本 command_args 和预期参数不一致（见 $INIT_FILE）"
 
@@ -314,7 +314,7 @@ grep -Fq "0.0.0.0:18130" "$INIT_FILE" && ! grep -q "0.0.0.0:18133" "$INIT_FILE" 
 
 note "测试7：certbot 走 apk 装（没有 certbot 替身时），再一键设域名"
 printf 'good.example 203.0.113.5\n' > "$TEST_ROOT/dns-map"
-run_mm '3\n10\n6\ngood.example\n0\n0\n10\n' | grep -q "域名设置完成" && ok "菜单域名一键提示完成" || bad "菜单域名一键提示不对（见 mm-out.txt）"
+run_mm '3\n5\n6\ngood.example\n0\n0\n10\n' | grep -q "域名设置完成" && ok "菜单域名一键提示完成" || bad "菜单域名一键提示不对（见 mm-out.txt）"
 grep -q "add.*certbot" "$TEST_ROOT/apk.log" && ok "certbot 是经 apk add 装的" || bad "certbot 没走 apk 装"
 has "$CFG" "^TLS_DOMAIN=good.example$" && has "$CFG" "^TLS_AUTO=0$" && ok "一键成功后配置是真 TLS（good.example）" || bad "一键成功后配置不是真 TLS"
 grep -Fq -- "--tls-domain good.example" "$INIT_FILE" && ok "一键成功后 init 脚本有真 TLS 参数" || bad "一键成功后 init 脚本没真 TLS"

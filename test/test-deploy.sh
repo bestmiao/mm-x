@@ -191,13 +191,13 @@ cp "$SRC_DIR/mmx-server-linux-amd64" "$SRC_DIR/mmx-server" 2>/dev/null || true
 note "部署脚本 --help 里有 443 说明"
 bash "$SRC_DIR/install-mm-x-server.sh" --help 2>&1 | grep -q "443" && ok "--help 提到 443（更像 HTTPS、被占怎么办）" || bad "--help 没提 443"
 
-note "测试1：全新安装（--port 18130 --name 测试节点）只装程序，不建节点"
-bash "$SRC_DIR/install-mm-x-server.sh" --port 18130 --name 测试节点 < /dev/null > "$TEST_ROOT/deploy.log" 2>&1
+note "测试1：全新安装（--port 18130）只装程序，不建节点"
+bash "$SRC_DIR/install-mm-x-server.sh" --port 18130 < /dev/null > "$TEST_ROOT/deploy.log" 2>&1
 DEPLOY_CODE=$?
 [ "$DEPLOY_CODE" = 0 ] && ok "部署脚本退出码 0" || bad "部署脚本退出码 $DEPLOY_CODE（见 deploy.log）"
 if grep -q "mmx://" "$TEST_ROOT/deploy.log"; then bad "部署输出里打印了 mmx:// 链接（应该只在菜单里看）"; else ok "部署输出里没有 mmx:// 链接"; fi
 grep -q "只装程序，不建节点" "$TEST_ROOT/deploy.log" && ok "部署输出说明只装程序、不建节点" || bad "部署输出没说只装程序"
-grep -q "已忽略" "$TEST_ROOT/deploy.log" && ok "部署输出说明安装参数（--port/--name）已忽略" || bad "部署输出没说安装参数已忽略"
+grep -q "已忽略" "$TEST_ROOT/deploy.log" && ok "部署输出说明安装参数（--port）已忽略" || bad "部署输出没说安装参数已忽略"
 grep -q "输入 mmx 打开菜单添加节点" "$TEST_ROOT/deploy.log" && ok "部署完成提示让用户输入 mmx 打开菜单添加节点" || bad "部署完成提示没提 mmx 菜单"
 [ -x "$MM_BIN" ] && ok "/usr/local/bin/mmx 存在且可执行" || bad "/usr/local/bin/mmx 不存在或不可执行"
 grep -Fq "printf '\033[32m'" "$MM_BIN" && ok "菜单脚本含绿色 printf（交互菜单统一绿色）" || bad "菜单脚本没有绿色 printf"
@@ -228,15 +228,15 @@ bash "$SRC_DIR/install-mm-x-server.sh" --port 19999 < /dev/null > "$TEST_ROOT/de
 [ ! -e "$TEST_ROOT/etc/mmx/psk" ] && ok "无配置时再跑仍不生成密钥" || bad "无配置时再跑生成了密钥"
 grep -q "输入 mmx 打开菜单添加节点" "$TEST_ROOT/deploy-rerun-nocfg.log" && ok "无配置时再跑仍提示进菜单加节点" || bad "无配置时再跑提示不对"
 
-note "测试1b：菜单第 1 项添加节点（端口 18130、节点名 测试节点、选 IP）建好节点"
-run_mm '1\n1\n18130\n测试节点\n\n1\n\n\n2\n10\n' | grep -q "用域名还是 IP" && ok "向导里问域名还是 IP（明确选，不是可选收尾）" || bad "向导里没问域名还是 IP"
+note "测试1b：菜单第 1 项添加节点（端口 18130、选 IP）建好节点"
+run_mm '1\n1\n18130\n\n1\n\n\n2\n10\n' | grep -q "用域名还是 IP" && ok "向导里问域名还是 IP（明确选，不是可选收尾）" || bad "向导里没问域名还是 IP"
 run_mm '5\n10\n' | grep -q "mmx://" && ok "加节点后菜单能显示链接" || bad "加节点后菜单没显示链接"
 "$MM_BIN" --show-link plain 2>/dev/null | grep -q $'\033' && bad "非交互 --show-link 输出带了 ANSI 颜色码（绿色只该在交互菜单里）" || ok "非交互 --show-link 输出干净（无颜色码）"
 has "$CFG" "^PORT=18130$" && ok "配置文件端口 18130" || bad "配置文件端口不对"
 has "$CFG" "^RATE=0$" && ok "配置文件默认不限速（RATE=0）" || bad "配置文件限速不对"
 has "$CFG" "^BURST=0$" && ok "配置文件默认突发 0（严格）" || bad "配置文件突发不对"
 has "$CFG" "^FALLBACK=site$" && ok "配置文件默认回退 site" || bad "配置文件回退不对"
-( . "$CFG"; [ "$NAME" = "测试节点" ] ) && ok "配置文件节点名是传进来的 测试节点" || bad "配置文件节点名不对"
+( . "$CFG"; [ "$NAME" = "$HOST" ] ) && ok "配置文件节点名自动取服务器地址" || bad "配置文件节点名不对"
 PSK="$(cat "$TEST_ROOT/etc/mmx/psk" 2>/dev/null)"
 printf '%s' "$PSK" | grep -Eq '^[0-9a-f]{64}$' && ok "密钥文件是 64 位十六进制" || bad "密钥文件格式不对"
 has "$UNIT" "ExecStart=" && ok "服务文件已生成" || bad "服务文件没生成"
@@ -273,43 +273,43 @@ has "$CFG" "^BURST=0$" && ok "配置文件 burst 已改为 0" || bad "配置文�
 has "$UNIT" "\-\-rate 3000K" && ok "服务文件 ExecStart 已用新限速" || bad "服务文件限速没更新"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "改限速后服务仍在运行" || bad "改限速后服务停了"
 
-note "测试6：菜单第 3 项 → 第 10 子项切换回退模式（site→silent→site）"
-run_mm '3\n10\n1\n0\n0\n10\n' | grep -q "回退模式改为 silent" && ok "回退切换到 silent" || bad "回退切换提示不对"
+note "测试6：菜单第 3 项 → 第 5 子项切换回退模式（site→silent→site）"
+run_mm '3\n5\n1\n0\n0\n10\n' | grep -q "回退模式改为 silent" && ok "回退切换到 silent" || bad "回退切换提示不对"
 has "$CFG" "^FALLBACK=silent$" && has "$UNIT" "\-\-fallback silent" && ok "配置+服务文件都已是 silent" || bad "回退 silent 没写进配置/服务"
-run_mm '3\n10\n1\n0\n0\n10\n' | grep -q "回退模式改为 site" && ok "回退切换回 site" || bad "回退切换回 site 失败"
+run_mm '3\n5\n1\n0\n0\n10\n' | grep -q "回退模式改为 site" && ok "回退切换回 site" || bad "回退切换回 site 失败"
 
-note "测试7：菜单第 3 项 → 第 10 子项开启真 TLS（自签名证书）再关闭"
+note "测试7：菜单第 3 项 → 第 5 子项开启真 TLS（自签名证书）再关闭"
 openssl req -x509 -newkey rsa:2048 -keyout "$TEST_ROOT/key.pem" -out "$TEST_ROOT/cert.pem" -days 1 -nodes -subj "/CN=test.example" -addext "subjectAltName=DNS:test.example" >/dev/null 2>&1
-run_mm "3\n10\n2\ntest.example\n$TEST_ROOT/cert.pem\n$TEST_ROOT/key.pem\n0\n0\n10\n" | grep -q "开启真 TLS" && ok "开启真 TLS 提示正常" || bad "开启真 TLS 提示不对"
+run_mm "3\n5\n2\ntest.example\n$TEST_ROOT/cert.pem\n$TEST_ROOT/key.pem\n0\n0\n10\n" | grep -q "开启真 TLS" && ok "开启真 TLS 提示正常" || bad "开启真 TLS 提示不对"
 has "$CFG" "^TLS_DOMAIN=test.example$" && has "$UNIT" "\-\-tls-domain test.example" && ok "配置+服务文件都有 TLS 域名" || bad "TLS 域名没写进配置/服务"
 TLS_OUT="$(run_mm '5\n10\n')"
 TLS_LINK="$(printf '%s' "$TLS_OUT" | grep -o 'mmx://[A-Za-z0-9_-]*' | head -1)"
 printf '%s' "$(opaque_info "$TLS_LINK")" | grep -q "pin=1" && ok "TLS 模式下链接带 pin（不透明格式，pin 藏在链接里）" || bad "TLS 模式下链接没有 pin"
 run_mm '5\n10\n' | grep -q "test.example" && ok "TLS 模式下链接地址是域名" || bad "TLS 模式下链接地址不是域名"
 run_mm '5\n10\n' | grep -Fq "1. test.example" && ok "第 5 项第 1 条地址是域名" || bad "第 5 项第 1 条地址不对"
-# IP 链接开关（第 3 项第 14 子项）：默认关（第 5 项只有 1 条）；打开后第 5 项多一条 IP 链接；再关掉恢复。
+# IP 链接开关（第 3 项第 9 子项）：默认关（第 5 项只有 1 条）；打开后第 5 项多一条 IP 链接；再关掉恢复。
 run_mm '5\n10\n' | grep -q "^2\. " && bad "默认就显示了第 2 条 IP 链接" || ok "默认第 5 项只有 1 条（IP 链接不显示）"
-run_mm '3\n14\n0\n10\n' | grep -q "IP 链接改为 显示" && ok "第 14 子项打开 IP 链接提示正常" || bad "打开 IP 链接提示不对"
+run_mm '3\n9\n0\n10\n' | grep -q "IP 链接改为 显示" && ok "第 9 子项打开 IP 链接提示正常" || bad "打开 IP 链接提示不对"
 has "$CFG" "^SHOW_IP_LINK=1$" && ok "配置里 IP 链接开关已是 1" || bad "配置里 IP 链接开关没打开"
 IP_OUT="$(run_mm '5\n10\n')"
 printf '%s' "$IP_OUT" | grep -Fq "2. 203.0.113.5" && ok "打开后第 5 项第 2 条是公网 IP" || bad "打开后第 5 项没有 IP 条目"
 [ "$(printf '%s' "$IP_OUT" | grep -c "mmx://")" = "2" ] && ok "打开后第 5 项有两条链接" || bad "打开后第 5 项链接数不对"
-run_mm '3\n14\n0\n10\n' | grep -q "IP 链接改为 不显示" && ok "第 14 子项关闭 IP 链接提示正常" || bad "关闭 IP 链接提示不对"
+run_mm '3\n9\n0\n10\n' | grep -q "IP 链接改为 不显示" && ok "第 9 子项关闭 IP 链接提示正常" || bad "关闭 IP 链接提示不对"
 has "$CFG" "^SHOW_IP_LINK=0$" && ok "配置里 IP 链接开关已是 0" || bad "配置里 IP 链接开关没关掉"
 run_mm '5\n10\n' | grep -q "^2\. " && bad "关掉后第 5 项还有第 2 条" || ok "关掉后第 5 项恢复只有 1 条"
-run_mm '3\n10\n3\n0\n0\n10\n' | grep -q "关闭真 TLS" && ok "关闭真 TLS 提示正常" || bad "关闭真 TLS 提示不对"
+run_mm '3\n5\n3\n0\n0\n10\n' | grep -q "关闭真 TLS" && ok "关闭真 TLS 提示正常" || bad "关闭真 TLS 提示不对"
 grep -q "^TLS_DOMAIN=''$" "$CFG" && ! grep -q "tls-domain" "$UNIT" && ok "关闭后配置+服务文件里没了 TLS" || bad "关闭 TLS 后还有残留"
 
-note "测试7b：菜单第 3 项 → 第 10 子项开启自签 TLS（无域名）再查指纹、关闭"
-run_mm "3\n10\n4\n\n0\n0\n10\n" | grep -q "开启自签 TLS" && ok "开启自签 TLS 提示正常" || bad "开启自签 TLS 提示不对"
+note "测试7b：菜单第 3 项 → 第 5 子项开启自签 TLS（无域名）再查指纹、关闭"
+run_mm "3\n5\n4\n\n0\n0\n10\n" | grep -q "开启自签 TLS" && ok "开启自签 TLS 提示正常" || bad "开启自签 TLS 提示不对"
 has "$CFG" "^TLS_AUTO=1$" && has "$UNIT" "\\-\\-tls-auto" && ok "配置+服务文件都有 --tls-auto" || bad "自签 TLS 没写进配置/服务"
 has "$UNIT" "tls-cert.pem" && has "$UNIT" "tls-key.pem" && ok "服务文件里自签证书是绝对路径" || bad "自签证书路径不对"
 ! run_mm '5\n10\n' | grep -q "obfs=tls-fake" && ok "自签模式下链接不是明文（短格式，obfs=tls 为 ver=5 默认）" || bad "自签模式下链接不对"
 SS_OUT="$(run_mm '5\n10\n')"
 SS_LINK="$(printf '%s' "$SS_OUT" | grep -o 'mmx://[A-Za-z0-9_-]*' | head -1)"
 printf '%s' "$(opaque_info "$SS_LINK")" | grep -q "pin=1" && ok "自签模式下链接带 pin" || bad "自签模式下链接没有 pin"
-run_mm '3\n10\n5\n0\n0\n10\n' | grep -Eq "[A-Za-z0-9_-]{43}" && ok "第 3 项 → 第 10 子项 → 第 5 子项能查到 43 位指纹" || bad "查指纹没拿到 pin"
-run_mm '3\n10\n3\n0\n0\n10\n' | grep -q "关闭自签 TLS" && ok "关闭自签 TLS 提示正常" || bad "关闭自签 TLS 提示不对"
+run_mm '3\n5\n5\n0\n0\n10\n' | grep -Eq "[A-Za-z0-9_-]{43}" && ok "第 3 项 → 第 5 子项（TLS）→ 其第 5 子项能查到 43 位指纹" || bad "查指纹没拿到 pin"
+run_mm '3\n5\n3\n0\n0\n10\n' | grep -q "关闭自签 TLS" && ok "关闭自签 TLS 提示正常" || bad "关闭自签 TLS 提示不对"
 grep -q "^TLS_AUTO=0$" "$CFG" && ! grep -q "tls-auto" "$UNIT" && ok "关闭后配置+服务文件里没了自签 TLS" || bad "关闭自签 TLS 后还有残留"
 
 note "测试8：菜单第 3 项改端口（18130→18131）"
@@ -346,7 +346,7 @@ bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 18140 < /dev/null > "$
 rm -f "$TEST_ROOT/ss-busy-ports"
 
 note "测试13：部署脚本带流量参数（--traffic-*）写进配置和服务文件"
-bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 18132 --rate 3000K --name 测试节点 --traffic-mode outbound --traffic-period quarterly --traffic-start-day 15 --traffic-limit-mode throttle --traffic-quota 500G --traffic-throttle-rate 1M < /dev/null > "$TEST_ROOT/deploy-traffic.log" 2>&1
+bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 18132 --rate 3000K --traffic-mode outbound --traffic-period quarterly --traffic-start-day 15 --traffic-limit-mode throttle --traffic-quota 500G --traffic-throttle-rate 1M < /dev/null > "$TEST_ROOT/deploy-traffic.log" 2>&1
 [ "$?" = 0 ] && ok "带流量参数的部署脚本退出码 0" || bad "带流量参数的部署脚本退出码非 0（见 deploy-traffic.log）"
 has "$CFG" "^TRAFFIC_MODE=outbound$" && has "$CFG" "^TRAFFIC_PERIOD=quarterly$" && has "$CFG" "^TRAFFIC_START_DAY=15$" && ok "配置文件里流量模式/周期/起始日正确" || bad "配置文件里流量模式/周期/起始日不对"
 has "$CFG" "^TRAFFIC_LIMIT_MODE=throttle$" && has "$CFG" "^TRAFFIC_QUOTA=500G$" && has "$CFG" "^TRAFFIC_THROTTLE_RATE=1M$" && ok "配置文件里限制模式/限额/TC 限速值正确" || bad "配置文件里限制模式/限额/TC 限速值不对"
@@ -359,12 +359,12 @@ bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 18132 --traffic-start-
 bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 18132 --traffic-quota 1X < /dev/null > "$TEST_ROOT/deploy-traffic-bad2.log" 2>&1
 [ "$?" != 0 ] && grep -q "流量限额格式不对" "$TEST_ROOT/deploy-traffic-bad2.log" && ok "部署时限额 1X 报错退出" || bad "部署时限额 1X 没报错"
 bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 18132 --rate 3000K --traffic-mode outbound --traffic-period quarterly --traffic-start-day 15 --traffic-limit-mode throttle --traffic-quota 500G --traffic-throttle-rate 1M < /dev/null > "$TEST_ROOT/deploy-noname.log" 2>&1
-[ "$?" = 0 ] && has "$CFG" "^NAME=mm-x$" && ok "不传 --name 且非交互时节点名用默认 mm-x（不卡住等输入）" || bad "不传 --name 时节点名不对（见 deploy-noname.log）"
+[ "$?" = 0 ] && has "$CFG" "^NAME=203.0.113.5$" && ok "不传 --name 且非交互时节点名自动取服务器地址 203.0.113.5" || bad "不传 --name 时节点名不对（见 deploy-noname.log）"
 # v5 掩护流量：默认 low 应写进配置和服务文件；显式 high 生效；非法值报错退出。
 # 注意：重装（--reinstall）会按传入参数全量重写配置，所以下面每次部署都要带上已有的
 # 流量参数（和测试 13 开头那次一样），否则限额/起始日会被重置回默认值，
 # 后面的测试 14（流量菜单）会跟着失败。
-COVER_DEPLOY_FLAGS="--reinstall --port 18132 --rate 3000K --name 测试节点 --traffic-mode outbound --traffic-period quarterly --traffic-start-day 15 --traffic-limit-mode throttle --traffic-quota 500G --traffic-throttle-rate 1M"
+COVER_DEPLOY_FLAGS="--reinstall --port 18132 --rate 3000K --traffic-mode outbound --traffic-period quarterly --traffic-start-day 15 --traffic-limit-mode throttle --traffic-quota 500G --traffic-throttle-rate 1M"
 has "$CFG" "^COVER_TRAFFIC=low$" && has "$UNIT" "\-\-cover-traffic low" && ok "默认掩护流量 low 已写进配置和服务文件" || bad "默认掩护流量 low 没写进配置/服务"
 bash "$SRC_DIR/install-mm-x-server.sh" $COVER_DEPLOY_FLAGS --cover-traffic high < /dev/null > "$TEST_ROOT/deploy-cover-high.log" 2>&1
 [ "$?" = 0 ] && has "$CFG" "^COVER_TRAFFIC=high$" && has "$UNIT" "\-\-cover-traffic high" && ok "--cover-traffic high 写进配置和服务文件" || bad "--cover-traffic high 没生效（见 deploy-cover-high.log）"
@@ -375,28 +375,38 @@ bash "$SRC_DIR/install-mm-x-server.sh" $COVER_DEPLOY_FLAGS --cover-traffic low <
 # 恢复 low 后流量参数必须还在（重装没把它们重置掉）。
 has "$CFG" "^TRAFFIC_QUOTA=500G$" && has "$CFG" "^TRAFFIC_START_DAY=15$" && ok "掩护部署后流量限额/起始日还在" || bad "掩护部署后流量参数被重置了"
 
-note "测试14：菜单第 3 项 → 第 11 项流量设置（查看/改限额/非法输入/清零）"
-run_mm '3\n11\n1\n0\n0\n10\n' | grep -q "流量统计（本周期）" && ok "流量设置里查看流量显示统计" || bad "流量设置里查看流量显示不对"
-run_mm '3\n11\n1\n0\n0\n10\n' | grep -q "限额：500.00 GB" && ok "查看流量显示限额 500.00 GB" || bad "查看流量限额显示不对"
-run_mm '3\n11\n6\n1T\n0\n0\n10\n' | grep -q "流量限额改为 1T" && ok "改限额提示正常" || bad "改限额提示不对"
+note "测试14：菜单第 3 项 → 第 6 项流量设置（查看/改限额/非法输入/清零）"
+run_mm '3\n6\n1\n0\n0\n10\n' | grep -q "流量统计（本周期）" && ok "流量设置里查看流量显示统计" || bad "流量设置里查看流量显示不对"
+run_mm '3\n6\n1\n0\n0\n10\n' | grep -q "限额：500.00 GB" && ok "查看流量显示限额 500.00 GB" || bad "查看流量限额显示不对"
+run_mm '3\n6\n6\n1T\n0\n0\n10\n' | grep -q "流量限额改为 1T" && ok "改限额提示正常" || bad "改限额提示不对"
 has "$CFG" "^TRAFFIC_QUOTA=1T$" && has "$UNIT" "\-\-traffic-quota 1T" && ok "配置+服务文件限额已是 1T" || bad "限额 1T 没写进配置/服务"
+run_mm '3\n6\n6\n180g\n0\n0\n10\n' | grep -q "流量限额改为 180G" && ok "改限额 180g（小写）提示正常（归一化为 180G）" || bad "改限额 180g 提示不对"
+has "$CFG" "^TRAFFIC_QUOTA=180G$" && ok "小写限额 180g 已存成 180G" || bad "小写限额 180g 没归一化"
+run_mm '3\n6\n6\n180\n0\n0\n10\n' | grep -q "流量限额改为 180G" && ok "改限额裸数字 180 提示正常（归一化为 180G）" || bad "改限额裸数字 180 提示不对"
+has "$CFG" "^TRAFFIC_QUOTA=180G$" && ok "裸数字限额 180 已存成 180G" || bad "裸数字限额 180 没归一化"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "改限额后服务仍在运行" || bad "改限额后服务停了"
-run_mm '3\n11\n4\n32\n0\n0\n10\n' | grep -q "起始日不对" && ok "起始日 32 被拒绝" || bad "起始日 32 没被拒绝"
+run_mm '3\n6\n4\n32\n0\n0\n10\n' | grep -q "起始日不对" && ok "起始日 32 被拒绝" || bad "起始日 32 没被拒绝"
 has "$CFG" "^TRAFFIC_START_DAY=15$" && ok "非法起始日后配置没变" || bad "非法起始日后配置被改了"
-run_mm '3\n11\n2\nfoo\n0\n0\n10\n' | grep -q "统计模式不对" && ok "统计模式 foo 被拒绝" || bad "统计模式 foo 没被拒绝"
-run_mm '3\n11\n8\ny\n0\n0\n10\n' | grep -q "已清零" && ok "清零本周期流量提示正常" || bad "清零提示不对"
+run_mm '3\n6\n2\nfoo\n0\n0\n10\n' | grep -q "统计模式不对" && ok "统计模式 foo 被拒绝" || bad "统计模式 foo 没被拒绝"
+run_mm '3\n6\n8\ny\n0\n0\n10\n' | grep -q "已清零" && ok "清零本周期流量提示正常" || bad "清零提示不对"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "清零后服务仍在运行" || bad "清零后服务停了"
 "$MM_BIN" --show-traffic 2>/dev/null | grep -q "流量统计（本周期）" && ok "隐藏用法 mmx --show-traffic 能显示流量统计" || bad "mmx --show-traffic 显示不对"
 
-note "测试14b：菜单第 3 项 → 第 12 项掩护流量（改档位/非法输入/恢复）"
-run_mm '3\n12\nhigh\n0\n10\n' | grep -q "掩护流量改为 high" && ok "改掩护档位提示正常" || bad "改掩护档位提示不对"
+note "测试14b：菜单第 3 项 → 第 7 项掩护流量（改档位/非法输入/恢复）"
+run_mm '3\n7\nhigh\n0\n10\n' | grep -q "掩护流量改为 high" && ok "改掩护档位提示正常" || bad "改掩护档位提示不对"
 has "$CFG" "^COVER_TRAFFIC=high$" && has "$UNIT" "\-\-cover-traffic high" && ok "配置+服务文件掩护档位已是 high" || bad "掩护档位 high 没写进配置/服务"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "改掩护档位后服务仍在运行" || bad "改掩护档位后服务停了"
-run_mm '3\n12\nfoo\n0\n10\n' | grep -q "档位不对" && ok "掩护档位 foo 被拒绝" || bad "掩护档位 foo 没被拒绝"
+run_mm '3\n7\nfoo\n0\n10\n' | grep -q "档位不对" && ok "掩护档位 foo 被拒绝" || bad "掩护档位 foo 没被拒绝"
 has "$CFG" "^COVER_TRAFFIC=high$" && ok "非法档位后配置没变" || bad "非法档位后配置被改了"
-run_mm '3\n12\noff\n0\n10\n' | grep -q "掩护流量改为 off" && ok "掩护档位改回 off 提示正常" || bad "掩护档位改回 off 提示不对"
-run_mm '3\n12\nlow\n0\n10\n' | grep -q "掩护流量改为 low" && ok "掩护档位恢复 low" || bad "掩护档位恢复 low 失败"
+run_mm '3\n7\noff\n0\n10\n' | grep -q "掩护流量改为 off" && ok "掩护档位改回 off 提示正常" || bad "掩护档位改回 off 提示不对"
+run_mm '3\n7\nlow\n0\n10\n' | grep -q "掩护流量改为 low" && ok "掩护档位恢复 low" || bad "掩护档位恢复 low 失败"
 has "$CFG" "^COVER_TRAFFIC=low$" && ok "恢复后配置掩护档位是 low" || bad "恢复后配置掩护档位不对"
+
+note "测试14c：部署时限额裸数字和小写自动归一化（180→180G，500g→500G）"
+bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 18132 --traffic-quota 180 < /dev/null > "$TEST_ROOT/deploy-traffic-bare.log" 2>&1
+[ "$?" = 0 ] && has "$CFG" "^TRAFFIC_QUOTA=180G$" && has "$UNIT" "\-\-traffic-quota 180G" && ok "部署时限额裸数字 180 存成 180G" || bad "部署时限额裸数字 180 没归一化（见 deploy-traffic-bare.log）"
+bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 18132 --traffic-quota 500g < /dev/null > "$TEST_ROOT/deploy-traffic-lower.log" 2>&1
+[ "$?" = 0 ] && has "$CFG" "^TRAFFIC_QUOTA=500G$" && has "$UNIT" "\-\-traffic-quota 500G" && ok "部署时限额小写 500g 存成 500G" || bad "部署时限额小写 500g 没归一化（见 deploy-traffic-lower.log）"
 
 note "测试15：菜单第 2 项谷歌服务（开→关→开，配置和服务文件跟着翻，服务重启）"
 # 当前节点是 mmx，白名单默认关
@@ -424,13 +434,13 @@ run_mm '2\n10\n' | grep -q "谷歌服务已开" && ok "第三次点第 2 项又�
 has "$CFG" "^DOMAIN_WHITELIST=google$" && ok "再开后配置又是 google" || bad "再开后配置不对"
 has "$UNIT" "\-\-domain-whitelist google" && ok "再开后服务文件又有白名单参数" || bad "再开后服务文件缺白名单参数"
 
-note "测试15a：菜单第 3 项第 13 项手动改域名白名单"
-run_mm '3\n13\ngoogle\n0\n10\n' | grep -q "域名白名单改为" && ok "手动开白名单提示正常" || bad "手动开白名单提示不对"
+note "测试15a：菜单第 3 项第 8 项手动改域名白名单"
+run_mm '3\n8\ngoogle\n0\n10\n' | grep -q "域名白名单改为" && ok "手动开白名单提示正常" || bad "手动开白名单提示不对"
 has "$CFG" "^DOMAIN_WHITELIST=google$" && ok "手动开白名单后配置是 google" || bad "手动开白名单后配置不对"
 has "$UNIT" "\-\-domain-whitelist google" && ok "手动开白名单后服务文件已更新" || bad "手动开白名单后服务文件没更新"
-run_mm '3\n13\nfoo\n0\n10\n' | grep -q "白名单不对" && ok "非法白名单值被拒绝" || bad "非法白名单值没被拒绝"
+run_mm '3\n8\nfoo\n0\n10\n' | grep -q "白名单不对" && ok "非法白名单值被拒绝" || bad "非法白名单值没被拒绝"
 has "$CFG" "^DOMAIN_WHITELIST=google$" && ok "非法值后配置保持 google" || bad "非法值后配置被改了"
-run_mm '3\n13\noff\n0\n10\n' | grep -q "域名白名单改为" && ok "手动关白名单提示正常" || bad "手动关白名单提示不对"
+run_mm '3\n8\noff\n0\n10\n' | grep -q "域名白名单改为" && ok "手动关白名单提示正常" || bad "手动关白名单提示不对"
 has "$CFG" "^DOMAIN_WHITELIST=''$" && ok "手动关白名单后配置已清空" || bad "手动关白名单后配置没清空"
 
 note "测试15b：再跑部署脚本（不加 --reinstall）不改节点配置；加 --reinstall 才重装"
@@ -443,7 +453,7 @@ grep -q "只更新程序文件" "$TEST_ROOT/deploy-rerun.log" && grep -q "不改
 [ "$(cat "$TEST_ROOT/etc/mmx/psk")" = "$RERUN_PSK_BEFORE" ] && ok "不加 --reinstall 时密钥未变" || bad "不加 --reinstall 时密钥被换了"
 has "$CFG" "^PORT=18132$" && has "$UNIT" "0.0.0.0:18132" && ! grep -q "19999" "$UNIT" && ok "不加 --reinstall 时端口仍是 18132（19999 没生效）" || bad "不加 --reinstall 时端口被改了"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "不加 --reinstall 再跑后服务仍在运行" || bad "不加 --reinstall 再跑后服务停了"
-bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 19999 --rate 100K --name 测试节点 < /dev/null > "$TEST_ROOT/deploy-reinstall.log" 2>&1
+bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 19999 --rate 100K < /dev/null > "$TEST_ROOT/deploy-reinstall.log" 2>&1
 [ "$?" = 0 ] && ok "加 --reinstall 再跑部署脚本退出码 0" || bad "加 --reinstall 再跑部署脚本退出码非 0（见 deploy-reinstall.log）"
 has "$CFG" "^PORT=19999$" && has "$CFG" "^RATE=100K$" && has "$UNIT" "0.0.0.0:19999" && ok "--reinstall 后端口/限速已按新参数重写" || bad "--reinstall 后配置没按新参数重写"
 [ "$(cat "$TEST_ROOT/etc/mmx/psk")" = "$RERUN_PSK_BEFORE" ] && ok "--reinstall 后密钥仍保留（重装不换密钥）" || bad "--reinstall 后密钥被换了"
@@ -451,7 +461,7 @@ has "$CFG" "^PORT=19999$" && has "$CFG" "^RATE=100K$" && has "$UNIT" "0.0.0.0:19
 
 note "测试15c：--domain 一键设置域名（格式错/冲突/DNS 不对/80 被占/成功/菜单路径）"
 # 15c-1：域名格式不对，部署直接报错，服务仍在跑（配置没动）
-bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 19999 --rate 100K --name 测试节点 --domain 'not a domain' < /dev/null > "$TEST_ROOT/deploy-domain-bad.log" 2>&1
+bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 19999 --rate 100K --domain 'not a domain' < /dev/null > "$TEST_ROOT/deploy-domain-bad.log" 2>&1
 [ "$?" != 0 ] && grep -q "域名不对" "$TEST_ROOT/deploy-domain-bad.log" && ok "--domain 格式不对时报错退出" || bad "--domain 格式不对时没报错"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "格式错被拒后服务仍在运行" || bad "格式错被拒后服务停了"
 # 15c-2：--domain 和 --tls-domain 不能同时用
@@ -459,24 +469,24 @@ bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 19999 --tls-domain x.e
 [ "$?" != 0 ] && grep -q "不能同时用" "$TEST_ROOT/deploy-domain-conflict.log" && ok "--domain 和 --tls-domain 冲突时报错退出" || bad "--domain 和 --tls-domain 冲突时没报错"
 # 15c-3：DNS 没解析到本机（dns-map 为空），报错，服务仍用自签 TLS 跑，不留半切配置
 printf '' > "$TEST_ROOT/dns-map"
-bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 19999 --rate 100K --name 测试节点 --domain good.example < /dev/null > "$TEST_ROOT/deploy-domain-nodns.log" 2>&1
+bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 19999 --rate 100K --domain good.example < /dev/null > "$TEST_ROOT/deploy-domain-nodns.log" 2>&1
 [ "$?" != 0 ] && grep -q "还没解析" "$TEST_ROOT/deploy-domain-nodns.log" && ok "DNS 没解析时报错退出" || bad "DNS 没解析时没报错"
 has "$CFG" "^TLS_AUTO=1$" && grep -q "^TLS_DOMAIN=''$" "$CFG" && ok "DNS 失败后仍是自签 TLS（没留半切配置）" || bad "DNS 失败后 TLS 配置不对"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "DNS 失败后服务仍在运行" || bad "DNS 失败后服务停了"
 # 15c-4：DNS 指到别人（不是本机 IP），报错
 printf 'good.example 198.51.100.1\n' > "$TEST_ROOT/dns-map"
-bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 19999 --rate 100K --name 测试节点 --domain good.example < /dev/null > "$TEST_ROOT/deploy-domain-wrongip.log" 2>&1
+bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 19999 --rate 100K --domain good.example < /dev/null > "$TEST_ROOT/deploy-domain-wrongip.log" 2>&1
 [ "$?" != 0 ] && grep -q "不是本机公网 IP" "$TEST_ROOT/deploy-domain-wrongip.log" && ok "DNS 指到别人时报错退出" || bad "DNS 指到别人时没报错"
 has "$CFG" "^TLS_AUTO=1$" && ok "DNS 错 IP 后仍是自签 TLS" || bad "DNS 错 IP 后 TLS 配置不对"
 # 15c-5：80 端口被占，报错
 printf 'good.example 203.0.113.5\nmenu.example 203.0.113.5\n' > "$TEST_ROOT/dns-map"
 echo "80" > "$TEST_ROOT/ss-busy-ports"
-bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 19999 --rate 100K --name 测试节点 --domain good.example < /dev/null > "$TEST_ROOT/deploy-domain-busy80.log" 2>&1
+bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 19999 --rate 100K --domain good.example < /dev/null > "$TEST_ROOT/deploy-domain-busy80.log" 2>&1
 [ "$?" != 0 ] && grep -q "80 端口" "$TEST_ROOT/deploy-domain-busy80.log" && ok "80 端口被占时报错退出" || bad "80 端口被占时没报错"
 has "$CFG" "^TLS_AUTO=1$" && ok "80 被占后仍是自签 TLS" || bad "80 被占后 TLS 配置不对"
 rm -f "$TEST_ROOT/ss-busy-ports"
 # 15c-6：DNS 对了、80 空着，一键成功
-bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 19999 --rate 100K --name 测试节点 --domain good.example < /dev/null > "$TEST_ROOT/deploy-domain-ok.log" 2>&1
+bash "$SRC_DIR/install-mm-x-server.sh" --reinstall --port 19999 --rate 100K --domain good.example < /dev/null > "$TEST_ROOT/deploy-domain-ok.log" 2>&1
 [ "$?" = 0 ] && ok "--domain 一键部署退出码 0" || bad "--domain 一键部署退出码非 0（见 deploy-domain-ok.log）"
 has "$CFG" "^TLS_DOMAIN=good.example$" && has "$CFG" "^TLS_AUTO=0$" && ok "一键成功后配置是真 TLS（good.example，自签已关）" || bad "一键成功后配置不是真 TLS"
 has "$CFG" "^TLS_CERT=$TEST_ROOT/etc/letsencrypt/live/good.example/fullchain.pem$" && has "$CFG" "^TLS_KEY=$TEST_ROOT/etc/letsencrypt/live/good.example/privkey.pem$" && ok "一键成功后配置里证书路径是 LE 的" || bad "一键成功后证书路径不对"
@@ -487,35 +497,35 @@ grep -q "\-\-reuse-key" "$TEST_ROOT/certbot.log" && grep -q "\-\-standalone" "$T
 grep -q "mmx://" "$TEST_ROOT/deploy-domain-ok.log" && ok "一键成功后部署输出打印了新链接" || bad "一键成功后部署输出没打印新链接"
 "$MM_BIN" --show-link plain 2>/dev/null | grep -q "good.example" && ok "新链接（plain）地址是域名 good.example" || bad "新链接地址不是域名"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "一键成功后服务仍在运行" || bad "一键成功后服务停了"
-# 15c-7：已开真 TLS 时菜单第 3 项 → 第 10 子项域名一键拒绝（换别的域名：先关再开；同域名则幂等）
-run_mm '3\n10\n6\nother.example\n0\n0\n10\n' | grep -q "已经开了" && ok "已开真 TLS 时换域名被拒绝并提示先关闭" || bad "已开真 TLS 时换域名没被拒绝"
+# 15c-7：已开真 TLS 时菜单第 3 项 → 第 5 子项域名一键拒绝（换别的域名：先关再开；同域名则幂等）
+run_mm '3\n5\n6\nother.example\n0\n0\n10\n' | grep -q "已经开了" && ok "已开真 TLS 时换域名被拒绝并提示先关闭" || bad "已开真 TLS 时换域名没被拒绝"
 has "$CFG" "^TLS_DOMAIN=good.example$" && ok "拒绝后域名配置没变" || bad "拒绝后域名配置被改了"
-run_mm '3\n10\n6\ngood.example\n0\n0\n10\n' | grep -q "已经是这个域名" && ok "同域名重复设置时提示已是该域名（幂等）" || bad "同域名重复设置时提示不对"
+run_mm '3\n5\n6\ngood.example\n0\n0\n10\n' | grep -q "已经是这个域名" && ok "同域名重复设置时提示已是该域名（幂等）" || bad "同域名重复设置时提示不对"
 has "$CFG" "^TLS_DOMAIN=good.example$" && ok "幂等后域名配置没变" || bad "幂等后域名配置被改了"
-# 15c-8：菜单第 3 项 → 第 10 子项先关 TLS，再用第 6 子项一键设另一个域名
-run_mm '3\n10\n3\n0\n0\n10\n' | grep -q "关闭真 TLS" && ok "菜单关闭真 TLS" || bad "菜单关闭真 TLS 失败"
-run_mm '3\n10\n6\nmenu.example\n0\n0\n10\n' | grep -q "域名设置完成" && ok "菜单域名一键提示完成" || bad "菜单域名一键提示不对"
+# 15c-8：菜单第 3 项 → 第 5 子项先关 TLS，再用第 6 子项一键设另一个域名
+run_mm '3\n5\n3\n0\n0\n10\n' | grep -q "关闭真 TLS" && ok "菜单关闭真 TLS" || bad "菜单关闭真 TLS 失败"
+run_mm '3\n5\n6\nmenu.example\n0\n0\n10\n' | grep -q "域名设置完成" && ok "菜单域名一键提示完成" || bad "菜单域名一键提示不对"
 has "$CFG" "^TLS_DOMAIN=menu.example$" && has "$CFG" "^TLS_AUTO=0$" && ok "菜单一键后配置是真 TLS（menu.example）" || bad "菜单一键后配置不是真 TLS"
 grep -q "reuse_key = True" "$TEST_ROOT/etc/letsencrypt/renewal/menu.example.conf" && ok "菜单一键后续期配置也有 reuse_key = True" || bad "菜单一键后续期配置没有 reuse_key"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "菜单一键后服务仍在运行" || bad "菜单一键后服务停了"
 
 note "测试15d：菜单第 1 项添加节点（向导：非法输入重问 + 全填值 + 覆盖确认 + 域名/IP 选择）"
 # 此时真 TLS 是 menu.example（测试 15c-8）：选域名 other.example 应被拒绝（已经开了），节点照常建成，TLS 配置不变。
-run_mm '1\ny\n1\n99999\n18140\n\n180G\n1\n\n\n1\nother.example\n10\n' | grep -q "端口不合法" && ok "向导里非法端口 99999 被拒绝并重问" || bad "向导里非法端口没被拒绝"
+run_mm '1\ny\n1\n99999\n18140\n180G\n1\n\n\n1\nother.example\n10\n' | grep -q "端口不合法" && ok "向导里非法端口 99999 被拒绝并重问" || bad "向导里非法端口没被拒绝"
 has "$CFG" "^PORT=18140$" && ok "向导建节点后端口是 18140" || bad "向导建节点后端口不对"
 has "$CFG" "^TRAFFIC_QUOTA=180G$" && has "$CFG" "^TRAFFIC_START_DAY=1$" && has "$CFG" "^TRAFFIC_LIMIT_MODE=throttle$" && has "$CFG" "^TRAFFIC_THROTTLE_RATE=125K$" && ok "向导建节点后流量设置正确（180G/1日/限速/125K）" || bad "向导建节点后流量设置不对"
-has "$CFG" "^NAME=mm-x$" && ok "向导里节点名空输入用默认 mm-x" || bad "向导里节点名默认值不对"
+has "$CFG" "^NAME=menu.example$" && ok "向导里节点名自动取域名 menu.example" || bad "向导里节点名不对"
 has "$CFG" "^TLS_DOMAIN=menu.example$" && ok "向导域名失败后真 TLS 配置没变（仍是 menu.example）" || bad "向导域名失败后 TLS 配置被改了"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "向导建节点后服务仍在运行" || bad "向导建节点后服务停了"
 run_mm '1\nn\n10\n' | grep -q "已有节点" && ok "已有节点时向导先提示覆盖，选 n 取消" || bad "已有节点时向导没提示覆盖"
 [ "$(cat "$CFG" | grep -c "^PORT=18140$")" = "1" ] && ok "取消覆盖后配置没变" || bad "取消覆盖后配置被改了"
-run_mm '1\ny\n1\n18141\n测试节点2\n500G\n15\nblock\n1M\n1\nother.example\n10\n' | grep -q "已经开了" && ok "向导里域名已被占用时提示先关闭（节点照常建成）" || bad "向导域名失败提示不对"
+run_mm '1\ny\n1\n18141\n500G\n15\nblock\n1M\n1\nother.example\n10\n' | grep -q "已经开了" && ok "向导里域名已被占用时提示先关闭（节点照常建成）" || bad "向导域名失败提示不对"
 has "$CFG" "^TLS_DOMAIN=menu.example$" && ok "第二次域名失败后真 TLS 配置仍没变" || bad "第二次域名失败后 TLS 配置被改了"
 has "$CFG" "^PORT=18141$" && has "$CFG" "^TRAFFIC_QUOTA=500G$" && has "$CFG" "^TRAFFIC_START_DAY=15$" && has "$CFG" "^TRAFFIC_LIMIT_MODE=block$" && has "$CFG" "^TRAFFIC_THROTTLE_RATE=1M$" && ok "重建后配置正确（18141/500G/15日/阻断/1M）" || bad "重建后配置不对"
-( . "$CFG"; [ "$NAME" = "测试节点2" ] ) && ok "重建后节点名是 测试节点2" || bad "重建后节点名不对"
+( . "$CFG"; [ "$NAME" = "menu.example" ] ) && ok "重建后节点名自动取域名 menu.example" || bad "重建后节点名不对"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "重建节点后服务仍在运行" || bad "重建节点后服务停了"
 # 选 IP 重建：TLS 应关掉（不沿用旧节点的真 TLS）。
-run_mm '1\ny\n1\n18142\nIP节点\n\n1\n\n\n2\n10\n' | grep -q "添加节点" && ok "选 IP 重建节点提示正常" || bad "选 IP 重建节点提示不对"
+run_mm '1\ny\n1\n18142\n\n1\n\n\n2\n10\n' | grep -q "添加节点" && ok "选 IP 重建节点提示正常" || bad "选 IP 重建节点提示不对"
 has "$CFG" "^PORT=18142$" && ok "选 IP 重建后端口是 18142" || bad "选 IP 重建后端口不对"
 has "$CFG" "^TLS_DOMAIN=''$" && has "$CFG" "^TLS_AUTO=0$" && ok "选 IP 重建后 TLS 已关（不沿用旧真 TLS）" || bad "选 IP 重建后 TLS 没关"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "选 IP 重建后服务仍在运行" || bad "选 IP 重建后服务停了"
@@ -532,23 +542,23 @@ run_mm '4\ny\n10\n' | grep -q "节点已删除" && ok "确认删除后提示节�
 [ -x "$MM_BIN" ] && ok "删除后菜单命令还在" || bad "删除后菜单命令没了"
 [ -f "$UNIT" ] && ok "删除后服务文件还在" || bad "删除后服务文件没了"
 run_mm '4\n10\n' | grep -q "没有节点配置" && ok "没节点时删除提示不用删除" || bad "没节点时删除提示不对"
-run_mm '1\n1\n\n\n\n\n\n\n2\n10\n' | grep -q "添加节点" && ok "删除后可用添加节点重建（全默认）" || bad "删除后添加节点重建失败"
+run_mm '1\n1\n\n\n\n\n\n2\n10\n' | grep -q "添加节点" && ok "删除后可用添加节点重建（全默认）" || bad "删除后添加节点重建失败"
 [ -f "$CFG" ] && has "$CFG" "^PORT=443$" && ok "重建后节点是默认端口 443" || bad "重建后节点端口不对"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "重建后服务仍在运行" || bad "重建后服务停了"
 
 
 note "测试15g：菜单第 1 项添加节点时顺手设域名（成功）"
 has "$CFG" "^TLS_DOMAIN=''$" && ok "向导前真 TLS 是关的（重建后默认，15f 已删不再先开）" || bad "向导前真 TLS 不该开"
-run_mm '1\ny\n1\n18150\n向导域名\n100G\n5\nthrottle\n200K\n1\nmenu.example\n10\n' | grep -q "域名设置完成" && ok "向导 + 域名 menu.example 时提示域名设置完成" || bad "向导 + 域名成功提示不对"
+run_mm '1\ny\n1\n18150\n100G\n5\nthrottle\n200K\n1\nmenu.example\n10\n' | grep -q "域名设置完成" && ok "向导 + 域名 menu.example 时提示域名设置完成" || bad "向导 + 域名成功提示不对"
 has "$CFG" "^PORT=18150$" && has "$CFG" "^TLS_DOMAIN=menu.example$" && has "$CFG" "^TRAFFIC_QUOTA=100G$" && ok "向导 + 域名成功后配置正确（18150/真 TLS menu.example/100G）" || bad "向导 + 域名成功后配置不对"
-( . "$CFG"; [ "$NAME" = "向导域名" ] ) && ok "向导 + 域名成功后节点名是 向导域名" || bad "向导 + 域名成功后节点名不对"
+( . "$CFG"; [ "$NAME" = "menu.example" ] ) && ok "向导 + 域名成功后节点名自动取域名 menu.example" || bad "向导 + 域名成功后节点名不对"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "向导 + 域名成功后服务仍在运行" || bad "向导 + 域名成功后服务停了"
 note "测试15h：添加节点向导里域名/IP 选择（无效选项重问、选域名时空域名重问）"
-run_mm '1\ny\n1\n18160\n选择测试\n\n1\n\n\n3\n2\n10\n' | grep -q "没有这个选项" && ok "向导里无效选择 3 被拒绝并重问" || bad "向导里无效选择没被拒绝"
+run_mm '1\ny\n1\n18160\n\n1\n\n\n3\n2\n10\n' | grep -q "没有这个选项" && ok "向导里无效选择 3 被拒绝并重问" || bad "向导里无效选择没被拒绝"
 has "$CFG" "^PORT=18160$" && ok "重问后选 IP 建好节点（端口 18160）" || bad "重问后选 IP 没建好节点"
 has "$CFG" "^TLS_DOMAIN=''$" && ok "选 IP 建节点时 TLS 是关的（没设域名）" || bad "选 IP 建节点时 TLS 不该开"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "选 IP 建节点后服务仍在运行" || bad "选 IP 建节点后服务停了"
-run_mm '1\ny\n1\n18161\n空域名测试\n\n1\n\n\n1\n\nmenu.example\n10\n' | grep -q "域名不能为空" && ok "选域名时空域名被拒绝并重问" || bad "选域名时空域名没被拒绝"
+run_mm '1\ny\n1\n18161\n\n1\n\n\n1\n\nmenu.example\n10\n' | grep -q "域名不能为空" && ok "选域名时空域名被拒绝并重问" || bad "选域名时空域名没被拒绝"
 has "$CFG" "^PORT=18161$" && ok "空域名重问后建好节点（端口 18161）" || bad "空域名重问后没建好节点"
 has "$CFG" "^TLS_DOMAIN=menu.example$" && ok "重问后填域名建好节点（真 TLS menu.example）" || bad "重问后填域名建节点时 TLS 不对"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "选域名建节点后服务仍在运行" || bad "选域名建节点后服务停了"
