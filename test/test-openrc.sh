@@ -260,7 +260,7 @@ grep -q "输入 mmx 打开菜单添加节点" "$TEST_ROOT/deploy.log" && ok "部
 run_mm() { printf '%b' "$1" | PATH="$OPENRC_PATH" "$MM_BIN" > "$TEST_ROOT/mm-out.txt" 2>&1; cat "$TEST_ROOT/mm-out.txt"; }
 
 note "测试1b：菜单第 1 项添加节点（端口 18130、选 IP）建好节点"
-run_mm '1\n1\n18130\n\n1\n\n\n2\n10\n' | grep -q "用域名还是 IP" && ok "向导里问域名还是 IP（明确选，不是可选收尾）" || bad "向导里没问域名还是 IP"
+run_mm '1\n1\n18130\n\n1\n\n\n2\n9\n' | grep -q "用域名还是 IP" && ok "向导里问域名还是 IP（明确选，不是可选收尾）" || bad "向导里没问域名还是 IP"
 has "$CFG" "^PORT=18130$" && ok "配置文件端口 18130" || bad "配置文件端口不对"
 grep -q "add mmx-server default" "$TEST_ROOT/rc-update.log" && ok "加节点时 rc-update add mmx-server default（开机自启）" || bad "加节点时没调 rc-update add"
 grep -q "restart" "$TEST_ROOT/rc-service.log" && ok "加节点时调用了 rc-service restart" || bad "加节点时没调用 rc-service restart"
@@ -282,20 +282,20 @@ INIT_ARGS="$(grep '^command_args=' "$INIT_FILE" | sed 's/^command_args="//; s/"$
 [ "$INIT_ARGS" = "$EXPECTED_ARGS" ] && ok "init 脚本 command_args 和 systemd ExecStart 参数字节一致" || bad "init 脚本 command_args 和预期参数不一致（见 $INIT_FILE）"
 
 note "测试3：菜单第 5 项查看节点"
-LINK_OUT="$(run_mm '5\n10\n')"
+LINK_OUT="$(run_mm '5\n9\n')"
 printf '%s' "$LINK_OUT" | grep -q "查看节点" && ok "第 5 项标题是查看节点" || bad "第 5 项标题不对"
 printf '%s' "$LINK_OUT" | grep -Fq "1. 203.0.113.5" && ok "第 1 条地址是探测到的公网 IP" || bad "第 1 条地址不对"
 LINK1="$(printf '%s' "$LINK_OUT" | grep -o 'mmx://[A-Za-z0-9_-]*' | head -1)"
 printf '%s' "$(opaque_info "$LINK1")" | grep -q "ver=5" && ok "链接是 ver=5（v5 默认）" || bad "链接版本不对"
 
-note "测试4：菜单第 6 项状态 / 第 7 项重启 / 第 8 项日志（走 rc-service，没有 journalctl）"
-run_mm '6\n10\n' | grep -q "正在运行" && ok "状态显示正在运行" || bad "状态显示不对"
+note "测试4：服务状态在菜单最上方默认显示 / 第 6 项日志（走 rc-service，没有 journalctl；重启菜单已删除）"
+run_mm '9\n' | grep -q "正在运行" && ok "菜单最上方显示服务正在运行" || bad "菜单最上方没显示服务状态"
 grep -q "status" "$TEST_ROOT/rc-service.log" && ok "状态查询走了 rc-service status" || bad "状态查询没走 rc-service"
-run_mm '7\n10\n' | grep -q "重启成功" && ok "重启成功" || bad "重启没成功"
-run_mm '8\n10\n' | grep -q "rc-service mmx-server status" && ok "没 journalctl 时日志页提示用 rc-service 看状态" || bad "日志页没提示 rc-service"
+run_mm '9\n' | grep -q "重启服务" && bad "菜单里还有重启服务这一项（已删除）" || ok "菜单里没有重启服务这一项"
+run_mm '6\n9\n' | grep -q "rc-service mmx-server status" && ok "没 journalctl 时日志页提示用 rc-service 看状态" || bad "日志页没提示 rc-service"
 
 note "测试5：菜单第 3 项 → 第 2/3 子项改限速（rate=3000K），init 脚本跟着更新"
-OUT5="$(run_mm '3\n2\n3000K\n3\n0\n0\n10\n')"
+OUT5="$(run_mm '3\n2\n3000K\n3\n0\n0\n9\n')"
 printf '%s' "$OUT5" | grep -q "限速 rate 改为 3000K" && ok "改 rate 提示正常" || bad "改 rate 提示不对"
 printf '%s' "$OUT5" | grep -q "突发 burst 改为 0" && ok "改 burst 提示正常" || bad "改 burst 提示不对"
 has "$CFG" "^RATE=3000K$" && ok "配置文件 rate 已改为 3000K" || bad "配置文件 rate 没改"
@@ -306,15 +306,16 @@ grep -Fq -- "--rate 3000K" "$INIT_FILE" && ok "init 脚本 command_args 已用�
 
 note "测试6：改端口后重启失败 → 回滚到原配置（走 rc-service）"
 touch "$TEST_ROOT/fail-next-restart"
-ROLLBACK_OUT="$(run_mm '3\n1\n18133\n0\n10\n')"
+ROLLBACK_OUT="$(run_mm '3\n1\n18133\n0\n9\n')"
 printf '%s' "$ROLLBACK_OUT" | grep -q "回滚" && ok "重启失败时提示回滚" || bad "重启失败时没提示回滚"
 has "$CFG" "^PORT=18130$" && ok "回滚后配置端口恢复 18130" || bad "回滚后配置端口不对"
 grep -Fq "0.0.0.0:18130" "$INIT_FILE" && ! grep -q "0.0.0.0:18133" "$INIT_FILE" && ok "回滚后 init 脚本恢复 18130" || bad "回滚后 init 脚本不对"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "回滚后服务用原配置恢复运行" || bad "回滚后服务没起来"
 
-note "测试7：certbot 走 apk 装（没有 certbot 替身时），再一键设域名"
+note "测试7：certbot 走 apk 装（没有 certbot 替身时），再一键设域名（TLS 菜单已移除，改走隐藏用法 mmx --setup-domain）"
 printf 'good.example 203.0.113.5\n' > "$TEST_ROOT/dns-map"
-run_mm '3\n5\n6\ngood.example\n0\n0\n10\n' | grep -q "域名设置完成" && ok "菜单域名一键提示完成" || bad "菜单域名一键提示不对（见 mm-out.txt）"
+PATH="$OPENRC_PATH" "$MM_BIN" --setup-domain good.example > "$TEST_ROOT/mm-out.txt" 2>&1
+grep -q "域名设置完成" "$TEST_ROOT/mm-out.txt" && ok "域名一键提示完成" || bad "域名一键提示不对（见 mm-out.txt）"
 grep -q "add.*certbot" "$TEST_ROOT/apk.log" && ok "certbot 是经 apk add 装的" || bad "certbot 没走 apk 装"
 has "$CFG" "^TLS_DOMAIN=good.example$" && has "$CFG" "^TLS_AUTO=0$" && ok "一键成功后配置是真 TLS（good.example）" || bad "一键成功后配置不是真 TLS"
 grep -Fq -- "--tls-domain good.example" "$INIT_FILE" && ok "一键成功后 init 脚本有真 TLS 参数" || bad "一键成功后 init 脚本没真 TLS"
@@ -323,10 +324,10 @@ grep -q "rc-service mmx-server restart" "$TEST_ROOT/etc/letsencrypt/renewal-hook
 ! grep -q "systemctl" "$TEST_ROOT/etc/letsencrypt/renewal-hooks/deploy/restart-mmx-server.sh" && ok "续期 hook 里没有 systemctl" || bad "续期 hook 里还有 systemctl"
 [ "$(cat "$TEST_ROOT/svc-state")" = "active" ] && ok "一键成功后服务仍在运行" || bad "一键成功后服务停了"
 
-note "测试8：菜单第 9 项完全卸载（走 rc-service/rc-update，清干净）"
+note "测试8：菜单第 8 项完全卸载（走 rc-service/rc-update，清干净）"
 touch "$TEST_ROOT/usr/local/bin/mmx.bak-preset"
 touch "$INIT_FILE.bak"
-UNINSTALL_OUT="$(printf '9\ny\n' | PATH="$OPENRC_PATH" "$MM_BIN" 2>&1)"
+UNINSTALL_OUT="$(printf '8\ny\n' | PATH="$OPENRC_PATH" "$MM_BIN" 2>&1)"
 printf '%s' "$UNINSTALL_OUT" | grep -q "已卸载" && ok "卸载提示正常" || bad "卸载提示不对"
 [ ! -e "$INIT_FILE" ] && ok "卸载后 init 脚本已删除" || bad "卸载后 init 脚本还在"
 [ ! -e "$INIT_FILE.bak" ] && ok "卸载后 init 脚本备份已删除" || bad "卸载后 init 脚本备份还在"

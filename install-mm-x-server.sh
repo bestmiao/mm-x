@@ -177,12 +177,12 @@ usage() {
   echo "                   （证书一般在 /etc/letsencrypt/live/你的域名/fullchain.pem 和 privkey.pem）"
   echo "  --tls-auto       自签 TLS 模式（没域名时用）：首次启动自动生成自签证书并存到 /etc/mmx/tls-cert.pem 和"
   echo "                   /etc/mmx/tls-key.pem；客户端靠 mmx:// 链接里的 pin（SPKI 指纹）锁定验证，不跳过验证。"
-  echo "                   和 --tls-domain 二选一；以后有了域名再用菜单第 3 项（编辑节点）→ 第 5 子项换成真 TLS"
+  echo "                   和 --tls-domain 二选一；以后有了域名，删除节点后用第 1 项重新添加（选域名）换成真 TLS"
   echo "  --tls-sni        自签 TLS 的默认 SNI（一个常见域名，例如 www.microsoft.com，默认就是它）；"
   echo "                   链接里写了 sni 参数就以链接为准"
   echo "  --domain   一键设置域名：装完自动申请 Let's Encrypt 证书并切到真 TLS（只在 --reinstall 重装节点时跑；"
   echo "           全新安装不建节点，所以 --domain 会被忽略，域名在菜单第 1 项添加节点时选；再跑脚本只更新程序文件时忽略，"
-  echo "           改域名请用 mmx 菜单第 3 项（编辑节点）→ 第 5 子项）。"
+  echo "           改域名请删除节点后用第 1 项重新添加（选域名）。"
   echo "           域名 DNS 必须先指到这台 VPS，80 端口要空着（certbot standalone 校验用）；"
   echo "           续期用 --reuse-key（密钥不变，pin 不变，链接不失效），续期后自动重启服务。"
   echo "           申请失败时服务仍用自签 TLS 继续跑，不会留半切的配置；和 --tls-domain 不能同时用"
@@ -254,7 +254,7 @@ if [ -f "$CFG_FILE" ] && [ "$REINSTALL" != "1" ]; then
   echo "检测到已安装的 mm-x 节点（端口 ${PORT:-未知}），本次只更新程序文件（服务端二进制、管理菜单、服务文件），不改节点配置。"
   echo "安装参数（--port/--rate/--traffic-*/--domain 等）已忽略；改节点参数请用 mmx 菜单；要彻底重装节点请加 --reinstall。"
   if [ -n "${DOMAIN_SETUP:-}" ]; then
-    echo "已忽略 --domain $DOMAIN_SETUP：只更新程序文件时不改 TLS 设置；要设置域名请用 mmx 菜单第 3 项（编辑节点）→ 第 5 子项，或加 --reinstall 重装时再传 --domain。"
+    echo "已忽略 --domain $DOMAIN_SETUP：只更新程序文件时不改 TLS 设置；要设置域名请删除节点后用第 1 项重新添加（选域名），或加 --reinstall 重装时再传 --domain。"
   fi
 fi
 # --reinstall 是显式重装：交互终端里再确认一次（默认不重装）；管道/自动化里直接执行。
@@ -540,10 +540,13 @@ echo "== 安装管理菜单 =="
 cat > "$BIN_DIR/mmx" <<'MM_MENU_EOF'
 #!/bin/bash
 # mm-x 服务端管理菜单：在 VPS 上输入 mmx 呼出。
-# 功能：1 添加节点  2 谷歌服务（仅谷歌系域名）  3 编辑节点（含流量设置、域名白名单）
-#       4 删除节点  5 查看节点  6 服务状态  7 重启服务  8 查看日志
-#       9 完全卸载  10 退出脚本
-# （更换密钥、诱饵回退 / TLS 设置已从主菜单移除，函数保留在脚本内；TLS 入口在第 3 项编辑节点第 5 子项）
+# 功能：1 添加节点  2 谷歌服务（仅谷歌系域名）  3 编辑节点（含流量设置）
+#       4 删除节点  5 查看节点  6 查看日志  7 更新脚本
+#       8 完全卸载  9 退出脚本
+# （服务状态直接显示在菜单最上方，不用选；更换密钥、诱饵回退 / TLS 设置、
+#  掩护流量、域名白名单已从菜单移除，全部自动设置；重启服务已删除，
+#  改配置时 apply_config 自动重载 + 重启；tls_menu 函数保留在脚本内，
+#  不再从菜单调用，域名在添加节点时选、TLS 自动设置）
 # 全部配置存在 /etc/mmx/config，密钥在 /etc/mmx/psk；
 # 服务文件由本脚本按配置文件生成，改参数后自动重载 + 重启，
 # 重启失败自动回滚到改之前的配置，不会让服务起不来。
@@ -976,7 +979,7 @@ show_link() {
     if [ -z "$PORT" ]; then echo "还没有节点，请用第 1 项添加节点。"; return 1; fi
     local link
     link="$(build_xray_link)"
-    if [ -z "$link" ]; then echo "拼链接失败（Xray 配置有问题），请看第 8 项日志。"; return 1; fi
+    if [ -z "$link" ]; then echo "拼链接失败（Xray 配置有问题），请看第 6 项日志。"; return 1; fi
     echo ""
     echo "节点链接（粘贴到客户端就能用，绝不要分享给第二个人）："
     echo "$link"
@@ -988,7 +991,7 @@ show_link() {
   local host link
   if [ -n "$TLS_DOMAIN" ]; then host="$TLS_DOMAIN"; else host="${HOST:-}"; fi
   link="$(build_link "$host" "$fmt")"
-  if [ -z "$link" ]; then echo "拼链接失败（密钥或参数有问题），请看第 8 项日志。"; return 1; fi
+  if [ -z "$link" ]; then echo "拼链接失败（密钥或参数有问题），请看第 6 项日志。"; return 1; fi
   echo ""
   echo "节点链接（粘贴到 mm-x 客户端就能用，绝不要分享给第二个人）："
   echo "$link"
@@ -998,7 +1001,7 @@ show_link() {
 # 5) 查看节点（主菜单第 5 项）：按节点列表显示，每条节点两行——
 #    第一行是地址（域名或 IP），第二行是它的链接。默认只显示本节点
 #    （域名 / 服务器地址）；IP 链接默认不显示，只有在第 3 项编辑节点
-#    第 9 子项里打开了才同时显示（同一台服务器的 IP 写法链接，
+#    第 6 子项里打开了才同时显示（同一台服务器的 IP 写法链接，
 #    不是第二个独立节点）。公网 IP 探不到、或和第一条地址一样时不显示第二条。
 show_nodes() {
   load_config
@@ -1020,7 +1023,7 @@ show_nodes() {
   elif [ -n "${HOST:-}" ]; then host1="$HOST"
   else host1="$(detect_public_ip)"; [ -z "$host1" ] && host1="<你的 VPS 公网 IP>"; fi
   link1="$(build_link "$host1" opaque)"
-  if [ -z "$link1" ]; then echo "拼链接失败（密钥或参数有问题），请看第 8 项日志。"; return 1; fi
+  if [ -z "$link1" ]; then echo "拼链接失败（密钥或参数有问题），请看第 6 项日志。"; return 1; fi
   echo ""
   echo "查看节点"
   echo "1. $host1"
@@ -1056,58 +1059,15 @@ show_pin() {
     if [ -n "${TLS_SNI:-}" ]; then sni_args=(--tls-sni "$TLS_SNI"); fi
     "$SERVER_BIN" --print-pin --tls-auto --tls-cert "$CFG_DIR/tls-cert.pem" --tls-key "$CFG_DIR/tls-key.pem" "${sni_args[@]}" 2>&1
   else
-    echo "TLS 没开（真 TLS 和自签 TLS 都关着），没有指纹。想开去第 3 项（编辑节点）→ 第 5 子项。"
+    echo "TLS 没开（真 TLS 和自签 TLS 都关着），没有指纹。想开请删除节点后用第 1 项重新添加（选域名走真 TLS）。"
     return 1
   fi
 }
 
-# 6) 服务状态
-show_status() {
-  load_config
-  # XHTTP/ss2022 节点：跑的是 xray，不是 mmx-server。
-  if [ "${PROTO:-mmx}" != "mmx" ]; then
-    if xray_is_active; then
-      echo "服务状态：正在运行（xray，$(proto_label) 节点）"
-    else
-      echo "服务状态：未运行（用第 7 项重启，或看第 8 项日志找原因）"
-    fi
-    if [ "$INIT_SYS" = "openrc" ]; then rc-service xray status 2>&1; else systemctl status xray --no-pager 2>&1; fi
-    if command -v ss >/dev/null 2>&1 && [ -n "$PORT" ]; then
-      if port_in_use "$PORT"; then echo "端口 $PORT 正在监听"; else echo "端口 $PORT 没在监听"; fi
-    fi
-    return 0
-  fi
-  if svc_is_active; then
-    echo "服务状态：正在运行"
-  else
-    echo "服务状态：未运行（用第 7 项重启，或看第 8 项日志找原因）"
-  fi
-  svc_status
-  if command -v ss >/dev/null 2>&1 && [ -n "$PORT" ]; then
-    if port_in_use "$PORT"; then echo "端口 $PORT 正在监听"; else echo "端口 $PORT 没在监听"; fi
-  fi
-}
-
-# 7) 重启服务
-restart_svc() {
-  load_config
-  # XHTTP/ss2022 节点：重启 xray。
-  if [ "${PROTO:-mmx}" != "mmx" ]; then
-    if xray_restart && xray_is_active; then
-      echo "重启成功，服务正在运行"
-    else
-      echo "重启失败！请看第 8 项日志：$(xray_log_cmd)"
-      return 1
-    fi
-    return 0
-  fi
-  if svc_restart && svc_is_active; then
-    echo "重启成功，服务正在运行"
-  else
-    echo "重启失败！请看第 8 项日志：$(svc_log_cmd)"
-    return 1
-  fi
-}
+# 服务状态直接显示在主菜单最上方（不用选）；重启服务已从菜单删除，
+# 改配置时 apply_config 自动重载 + 重启。show_status / restart_svc
+# 已删除（只被主菜单调用过）；底层 svc_status / svc_restart 仍在，
+# apply_config 和安装流程继续用它们。
 
 # 更换密钥（已从主菜单移除，函数保留）：写新密钥进 /etc/mmx/psk，服务端按 24 小时宽限期自动识别新密钥，
 #    不用重启；旧链接 24 小时内仍能用，之后作废。
@@ -1124,7 +1084,19 @@ rotate_key() {
   show_nodes
 }
 
-# 8) 查看日志
+# 7) 更新脚本：重新跑一键安装（UPDATE_ONLY 模式：只更新程序文件——
+#    服务端二进制、管理菜单、服务文件；节点配置/端口/密钥/TLS/流量保留
+#    不变，结束显示“更新完成”）。安装脚本在交互终端下会自动打开新菜单，
+#    这里随后退出旧菜单，避免新旧两个菜单叠在一起。
+#    更新失败（下载不到脚本）时不退出，留在菜单里。
+update_script() {
+  echo "正在更新脚本与程序文件（节点配置保留不变）……"
+  curl -fsSL https://raw.githubusercontent.com/bestmiao/mm-x/main/install-mm-x-server.sh | bash
+  echo "更新完成，旧菜单退出，输入 mmx 打开新菜单。"
+  exit 0
+}
+
+# 6) 查看日志
 show_logs() {
   load_config
   # XHTTP/ss2022 节点：看 xray 的日志，不是 mmx-server 的。
@@ -1162,7 +1134,7 @@ show_traffic() {
 # 流量设置：统计模式 / 周期 / 起始日 / 限制模式 / 限额 / TC 限速值都能改，
 # 改完走 apply_config（重载 + 重启，失败自动回滚）；只改限额/限制模式/
 # TC 限速值不重置计数，改统计模式/周期/起始日会按新口径重算。
-# 入口在第 3 项“编辑节点”子菜单第 6 项。
+# 入口在第 3 项“编辑节点”子菜单第 5 项。
 traffic_menu() {
   while true; do
     load_config; load_xray_config
@@ -1296,7 +1268,7 @@ toggle_whitelist() {
   fi
 }
 
-# 诱饵回退 / TLS 设置（主菜单已移除；入口在第 3 项“编辑节点”第 5 子项）：真 TLS（有域名）和自签 TLS（没域名）二选一；
+# 诱饵回退 / TLS 设置（已从菜单移除；域名在添加节点时选，TLS 自动设置）：真 TLS（有域名）和自签 TLS（没域名）二选一；
 #    自签证书首次启动自动生成并存到 /etc/mmx/tls-cert.pem、tls-key.pem，
 #    客户端靠链接里的 pin（SPKI 指纹）锁定验证；换证书要重新生成链接（第 5 项）。
 # 本机公网 IPv4：配置里的 HOST 是 IP 就用它，否则现探测（和部署脚本一样的办法）；
@@ -1331,7 +1303,7 @@ resolve_domain_ips() {
   printf '%s' "$out"
 }
 
-# 域名一键设置：申请 Let's Encrypt 证书并切到真 TLS（交互入口在第 3 项编辑节点 → 第 5 子项 → 第 6 子项；
+# 域名一键设置：申请 Let's Encrypt 证书并切到真 TLS（添加节点选域名时调用；
 # 隐藏用法 mmx --setup-domain <域名>，部署脚本的 --domain 也走这里）。
 # 步骤：校验域名 → DNS 解析到本机公网 IP → 80 端口空闲 → 装 certbot
 # → certbot certonly --standalone --reuse-key（续期密钥不变，pin 不变）
@@ -1350,7 +1322,7 @@ setup_domain() {
       echo "真 TLS 已经是这个域名（$dom），不用重复设置。"
       return 0
     fi
-    echo "真 TLS 已经开了（域名 $TLS_DOMAIN），先用第 3 项编辑节点 → 第 5 子项 → 第 3 子项关闭再设置新域名。"
+    echo "真 TLS 已经开了（域名 $TLS_DOMAIN），想换域名请先删除节点再重新添加（选新域名）。"
     return 1
   fi
   # DNS 必须先指到本机公网 IP，否则 Let's Encrypt 校验通不过
@@ -1454,6 +1426,8 @@ HOOK_EOF
   return 0
 }
 
+# 诱饵回退 / TLS 菜单已从编辑节点移除（不再从菜单调用，函数保留在脚本内；
+# 诱饵回退默认 site、TLS 在添加节点时自动设置，域名在添加节点时选）。
 tls_menu() {
   while true; do
     load_config
@@ -2963,10 +2937,12 @@ add_node() {
 }
 
 # 3) 编辑节点：按项改；改完校验，写回配置，
-#    重载 + 重启，重启失败自动回滚。第 6 项是流量设置（统计模式/周期/
-#    起始日/限制模式/限额/TC 限速值 + 查看流量），第 7 项是掩护流量档位，
-#    第 8 项是域名白名单（off 关 / google 只放行谷歌系域名），
-#    第 9 项是 IP 链接开关（在第 5 项查看节点里同时显示 IP 地址的链接）。
+#    重载 + 重启，重启失败自动回滚。第 5 项是流量设置（统计模式/周期/
+#    起始日/限制模式/限额/TC 限速值 + 查看流量），
+#    第 6 项是 IP 链接开关（在第 5 项查看节点里同时显示 IP 地址的链接）。
+#    （诱饵回退 / TLS、掩护流量、域名白名单已从编辑节点移除，全部自动设置：
+#    诱饵默认 site、TLS 添加节点时自动设置、掩护流量默认 low、
+#    域名白名单默认关，用主菜单第 2 项谷歌服务开关。）
 edit_params() {
   load_config; load_xray_config
   # 没节点时没东西可改，拒绝（否则会写出端口为空的坏配置）。
@@ -2979,26 +2955,21 @@ edit_params() {
     echo "2) 限速 rate（当前 $RATE）"
     echo "3) 突发 burst（当前 $BURST）"
     echo "4) 服务器地址（当前 ${HOST:-未设置}，链接里用的地址）"
-    echo "5) 诱饵回退 / TLS 设置"
-    echo "6) 流量设置（统计模式 / 周期 / 限额 / 查看流量）"
-    echo "7) 掩护流量（当前 ${COVER_TRAFFIC:-low}：off 关 / low 空闲约 45 秒一帧 / high 空闲约 20 秒一帧）"
-    echo "8) 域名白名单（当前 $([ -n "${DOMAIN_WHITELIST:-}" ] && echo "仅谷歌系域名" || echo "关闭")：只放行谷歌系域名时，非谷歌目标直接拒绝）"
-    echo "9) IP 链接（当前 $([ "${SHOW_IP_LINK:-0}" = "1" ] && echo "显示" || echo "不显示")：在第 5 项查看节点里同时显示 IP 地址的链接）"
+    echo "5) 流量设置（统计模式 / 周期 / 限额 / 查看流量）"
+    echo "6) IP 链接（当前 $([ "${SHOW_IP_LINK:-0}" = "1" ] && echo "显示" || echo "不显示")：在第 5 项查看节点里同时显示 IP 地址的链接）"
     echo "0) 返回"
     local c
     read -r -p "改哪一项： " c || return 0
-    # mmx 专属项（rate/burst、TLS/诱饵、掩护流量、IP 链接）：
+    # mmx 专属项（rate/burst、IP 链接）：
     # XHTTP/ss2022 节点没有这些设置，选了就提示，不进下面的分支。
     case "$c" in
-      2|3|5|7|9)
+      2|3|6)
         if [ "${PROTO:-mmx}" != "mmx" ]; then
           echo "这一项是 mmx 节点专属的，当前节点是 $(proto_label)，没有这个设置。"
           pause; continue
         fi
         ;;
     esac
-    # 域名白名单对 XHTTP 和 ss2022 都能设（谷歌服务两个协议都有）；
-    # mmx 节点的白名单是服务端按域名过滤，走下面的第 8 项分支。
     case "$c" in
       1)
         local np
@@ -3039,33 +3010,8 @@ edit_params() {
         HOST="$hh"
         apply_config "服务器地址改为 $HOST"
         ;;
-      5) tls_menu ;;
-      6) traffic_menu ;;
-      7)
-        local cv
-        read -r -p "掩护流量档位（off 关 / low 低 / high 高，留空不变）： " cv || continue
-        [ -z "$cv" ] && { echo "没改。"; pause; continue; }
-        case "$cv" in
-          off|low|high|关|低|高) COVER_TRAFFIC="$cv" ;;
-          *) echo "档位不对：$cv，应为 off / low / high"; pause; continue;;
-        esac
-        apply_config "掩护流量改为 $COVER_TRAFFIC"
-        ;;
-      8)
-        local dw
-        read -r -p "域名白名单（off 关 / google 只放行谷歌系域名，留空不变）： " dw || continue
-        [ -z "$dw" ] && { echo "没改。"; pause; continue; }
-        case "$(printf '%s' "$dw" | tr '[:upper:]' '[:lower:]')" in
-          ""|off|none|关) DOMAIN_WHITELIST="" ;;
-          google|谷歌|谷歌系) DOMAIN_WHITELIST="google" ;;
-          *) echo "白名单不对：$dw，应为 off（关）或 google（只放行谷歌系域名）"; pause; continue;;
-        esac
-        if [ -n "$DOMAIN_WHITELIST" ]; then
-          echo "注意：白名单一开，非谷歌域名（GitHub、AI、视频站等）和 IP 字面量目标都会被拒绝，只剩谷歌系能走这台服务器。"
-        fi
-        apply_config "域名白名单改为 $([ -n "$DOMAIN_WHITELIST" ] && echo "仅谷歌系域名" || echo "关闭")"
-        ;;
-      9)
+      5) traffic_menu ;;
+      6)
         if [ "${SHOW_IP_LINK:-0}" = "1" ]; then SHOW_IP_LINK="0"; else SHOW_IP_LINK="1"; fi
         apply_config "IP 链接改为 $([ "$SHOW_IP_LINK" = "1" ] && echo "显示" || echo "不显示")（第 5 项查看节点里同时显示 IP 地址的链接）"
         ;;
@@ -3205,14 +3151,14 @@ main() {
       if xray_is_active; then
         echo "服务：正在运行（xray，$(proto_label) 节点）　端口：${PORT:-?}"
       else
-        echo "服务：未运行（用第 7 项重启，或看第 8 项日志）"
+        echo "服务：未运行（看第 6 项日志）"
         echo "协议：$(proto_label)　端口：${PORT:-?}"
       fi
     elif svc_is_active; then
       echo "服务：正在运行　端口：${PORT:-?}　限速：${RATE:-?}"
       echo "TLS ：$tls_desc"
     else
-      echo "服务：未运行（用第 7 项重启，或看第 8 项日志）"
+      echo "服务：未运行（看第 6 项日志）"
       echo "端口：${PORT:-?}　限速：${RATE:-?}"
     fi
     echo "   1：添加节点"
@@ -3224,11 +3170,10 @@ main() {
     echo "   3：编辑节点"
     echo "   4：删除节点"
     echo "   5：查看节点"
-    echo "   6：服务状态"
-    echo "   7：重启服务"
-    echo "   8：查看日志"
-    echo "   9：完全卸载"
-    echo "  10：退出脚本"
+    echo "   6：查看日志"
+    echo "   7：更新脚本"
+    echo "   8：完全卸载"
+    echo "   9：退出脚本"
     local c
     read -r -p "选项：" c || exit 0
     case "$c" in
@@ -3237,11 +3182,10 @@ main() {
       3) edit_params ;;
       4) delete_node ;;
       5) show_nodes ;;
-      6) show_status ;;
-      7) restart_svc ;;
-      8) show_logs ;;
-      9) uninstall ;;
-      10|"") exit 0 ;;
+      6) show_logs ;;
+      7) update_script ;;
+      8) uninstall ;;
+      9|"") exit 0 ;;
       *) echo "没有这个选项" ;;
     esac
     pause
@@ -3271,9 +3215,9 @@ if [ "${PROTO:-mmx}" != "mmx" ]; then
       systemctl is-active --quiet xray 2>/dev/null || systemctl start xray 2>/dev/null || true
     fi
     if [ "$INIT_SYS" = "openrc" ]; then
-      rc-service xray status >/dev/null 2>&1 && echo "服务已启动：xray 正在运行" || echo "xray 没起来，请看日志：mmx 菜单第 8 项，或 tail -n 50 /var/log/messages"
+      rc-service xray status >/dev/null 2>&1 && echo "服务已启动：xray 正在运行" || echo "xray 没起来，请看日志：mmx 菜单第 6 项，或 tail -n 50 /var/log/messages"
     else
-      systemctl is-active --quiet xray 2>/dev/null && echo "服务已启动：xray 正在运行" || echo "xray 没起来，请看日志：mmx 菜单第 8 项，或 journalctl -u xray -n 50"
+      systemctl is-active --quiet xray 2>/dev/null && echo "服务已启动：xray 正在运行" || echo "xray 没起来，请看日志：mmx 菜单第 6 项，或 journalctl -u xray -n 50"
     fi
   else
     echo "xray 没装（XHTTP/ss2022 节点需要它），请用 mmx 菜单第 1 项重新添加节点。"
@@ -3329,7 +3273,7 @@ else
   echo "密钥文件：$PSK_FILE（未变）；配置文件：$CFG_FILE（未动）"
 fi
 echo "想改节点参数用 mmx 菜单；想彻底重装节点请加 --reinstall。"
-echo "服务状态：mmx 菜单第 6 项，或 $(svc_status_cmd)；日志：mmx 菜单第 8 项，或 $(svc_log_follow_cmd)"
+echo "服务状态：打开菜单最上方直接显示，或 $(svc_status_cmd)；日志：mmx 菜单第 6 项，或 $(svc_log_follow_cmd)"
 elif [ "$FRESH_NO_NODE" = "1" ]; then
 echo ""
 echo "== 安装完成（只装了程序，未创建节点） =="
@@ -3353,7 +3297,7 @@ else
 fi
 echo "密钥文件：$PSK_FILE（重装不换密钥；换密钥请直接改此文件，服务端自动识别，24 小时内新旧密钥都能用）"
 echo "配置文件：$CFG_FILE（菜单改参数就改这个文件）"
-echo "服务状态：mmx 菜单第 6 项，或 $(svc_status_cmd)；日志：mmx 菜单第 8 项，或 $(svc_log_follow_cmd)"
+echo "服务状态：打开菜单最上方直接显示，或 $(svc_status_cmd)；日志：mmx 菜单第 6 项，或 $(svc_log_follow_cmd)"
 echo ""
 echo "输入 mmx 打开管理菜单，在菜单第 5 项查看节点（粘贴到 mm-x 客户端就能用，绝不要分享给第二个人）。"
 fi
@@ -3367,7 +3311,7 @@ echo "== 一键设置域名 $DOMAIN_SETUP =="
 if "$BIN_DIR/mmx" --setup-domain "$DOMAIN_SETUP"; then
   echo "域名已设置：真 TLS（$DOMAIN_SETUP），新链接见上面（旧链接已失效，请更新客户端）。"
 else
-  echo "域名设置失败：服务仍用自签 TLS 继续运行（见上面的报错）；之后可用 mmx 菜单第 3 项（编辑节点）→ 第 5 子项重试。"
+  echo "域名设置失败：服务仍用自签 TLS 继续运行（见上面的报错）；之后可删除节点后用第 1 项重新添加（选域名）重试。"
   exit 1
 fi
 fi
