@@ -1,17 +1,23 @@
 // 服务器地址解析：域名怎么解析才可靠。
 //
-// 策略（写进 PROTOCOL.md 的“IP 还是域名”一节）：
+// 策略：
 //  1. IP 地址：直接用，不解析；
-//  2. 域名：先走系统 DNS（快，也支持内网/自定义域名）；
-//  3. 系统 DNS 失败：自动走内置 DoH 兜底（Google → Cloudflare，
-//     对 DoH 服务器本身用硬编码 IP 直连 + SNI，不依赖本地 DNS 解析它）；
+//  2. 域名：先走系统 DNS（快，也支持内网/自定义域名）；系统 DNS 给了
+//     198.18.0.0/15 假地址段按没解析到处理（0.1.47：被污染的解析器对
+//     部分域名返回这个段的假 IP，拨过去是中间件回包，握手发不到真服务器；
+//     只过滤这个从不分配给真实公网服务器的保留段，其他 IP 不动——没有
+//     DNSSEC 校验就认不出别的假 IP，原型不做那一步）；
+//  3. 系统 DNS 失败或只给了假 IP：自动走内置 DoH 兜底（中国大陆可达的先，
+//     再走 Google / Cloudflare——后两者在中国大陆常被 GFW 阻断，
+//     只靠它们时新域名（如刚解析的 eu.org 域名）解析失败，
+//     转发器连一次握手都发不出去；对 DoH 服务器本身用硬编码 IP
+//     直连 + SNI，不依赖本地 DNS 解析它）；DoH 返回里同样过滤假 IP；
 //  4. 两次都失败才报错，提示换 IP 直连。
 //
 // 为什么不“走代理去解析”：mm-x 前面没有上游代理可以借——
 // 客户端自己就是要去连 mm-x 服务端的，没有别的通道能替它解析。
-// 为什么 DoH 只在系统 DNS 失败时触发：个人域名被污染的概率极低，
-// 污染返回的是错误 IP 不是解析失败，DoH 也防不住那种情况（除非做
-// DNSSEC 校验，原型不做）；真怀疑被污染时，直接用 IP 写链接最稳妥。
+// 为什么 DoH 只在系统 DNS 失败（或只给假 IP）时触发：个人域名被污染的
+// 概率极低；真怀疑被污染时，直接用 IP 写链接最稳妥。
 package mmx
 
 import (
@@ -34,9 +40,18 @@ type dohEndpoint struct {
 	dialIP string
 }
 
-// dohEndpoints 是 DoH 兜底的顺序：Google 先，Cloudflare 后。
+// dohEndpoints 是 DoH 兜底的顺序：先走中国大陆可达的（阿里 DNS、
+// 腾讯 DNSPod，2026-11-27 实测两者 JSON 接口都能解析 example.com，
+// 硬编码 IP 直连 + SNI 也通），再走 Google、Cloudflare。
+// 顺序不能反：中国大陆的运营商 DNS 解析不出新域名时，Google /
+// Cloudflare 的 DoH 常被 GFW 阻断，排在前面只会白白超时。
+// 注意：doh.pub 的直连 IP 只能用 120.53.53.53（DNSPod DoH 任播地址，
+// 实测 443 通、SNI 校验过）；119.29.29.29 是 DNSPod 的 UDP/53 解析
+// 地址，443 根本不通，写它这家兜底永远失败。
 // 测试可以替换这个变量，用本地 httptest 服务器冒充 DoH 接口。
 var dohEndpoints = []dohEndpoint{
+	{url: "https://dns.alidns.com/resolve", dialIP: "223.5.5.5"},
+	{url: "https://doh.pub/dns-query", dialIP: "120.53.53.53"},
 	{url: "https://dns.google/resolve", dialIP: "8.8.8.8"},
 	{url: "https://cloudflare-dns.com/dns-query", dialIP: "1.1.1.1"},
 }
@@ -47,7 +62,35 @@ var systemLookup = func(ctx context.Context, host string) ([]string, error) {
 	return net.DefaultResolver.LookupHost(ctx, host)
 }
 
-// ResolveHost 解析服务器地址：IP 直接返回；域名先系统 DNS，失败再内置 DoH。
+// isReservedFakeIP 是不是 198.18.0.0/15 保留假地址段：RFC 2544 基准测试
+// 保留段，从不分配给真实公网服务器；劫持型 DNS（NXDOMAIN 也返回一个地址）
+// 和 Fake DNS 漏出来的地址常落在这里，解析到这个段等于没解析到
+// （和 Windows isReservedFakeIp / 手机 RegionResolver.isReservedFakeIp 一致）。
+func isReservedFakeIP(ip string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	v4 := parsed.To4()
+	if v4 == nil {
+		return false
+	}
+	return v4[0] == 198 && (v4[1] == 18 || v4[1] == 19)
+}
+
+// filterFakeIPs 滤掉解析结果里的 198.18.0.0/15 假地址，剩下的原样返回。
+func filterFakeIPs(ips []string) []string {
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		if !isReservedFakeIP(ip) {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+// ResolveHost 解析服务器地址：IP 直接返回；域名先系统 DNS（假 IP 过滤），
+// 失败或只给假 IP 再内置 DoH（同样过滤假 IP）。
 func ResolveHost(host string) ([]string, error) {
 	if ip := net.ParseIP(host); ip != nil {
 		return []string{ip.String()}, nil
@@ -55,7 +98,10 @@ func ResolveHost(host string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if ips, err := systemLookup(ctx, host); err == nil && len(ips) > 0 {
-		return ips, nil
+		if filtered := filterFakeIPs(ips); len(filtered) > 0 {
+			return filtered, nil
+		}
+		// 系统 DNS 只给了假 IP：按解析失败处理，往下走 DoH 兜底
 	}
 	var lastErr error
 	for _, ep := range dohEndpoints {
@@ -138,8 +184,10 @@ func resolveViaDoH(name string, ep dohEndpoint) ([]string, error) {
 				ips = append(ips, ip.String())
 			}
 		}
-		if len(ips) > 0 {
-			return ips, nil
+		// 0.1.47：DoH 返回里同样过滤 198.18.0.0/15 假地址；只剩假地址时
+		// 按没解析到处理，换记录类型/换一家再试。
+		if filtered := filterFakeIPs(ips); len(filtered) > 0 {
+			return filtered, nil
 		}
 	}
 	return nil, fmt.Errorf("DoH 没有返回 %s 的地址记录", name)

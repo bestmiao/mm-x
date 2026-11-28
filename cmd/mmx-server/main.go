@@ -57,6 +57,7 @@ func main() {
 	blockFails := flag.Int("block-fails", 5, "拉黑阈值：窗口内握手失败达到这么多次就拉黑该 IP")
 	blockWindowStr := flag.String("block-window", "1m", "拉黑统计窗口，例如 1m / 30s")
 	blockDurationStr := flag.String("block-duration", "10m", "拉黑时长，例如 10m / 1h，到期自动解除")
+	noPSKLeakCheck := flag.Bool("no-psk-leak-check", false, "关闭 PSK 泄露检测（默认开启：同一密钥同时从两个 IP 使用时记一条警告日志）")
 	// --whitelist 可重复写多个：--whitelist 1.2.3.4 --whitelist 5.6.7.8
 	var whitelistIPs stringList
 	flag.Var(&whitelistIPs, "whitelist", "拉黑白名单 IP（可重复写多个）：白名单里的 IP 永远不拉黑，失败也不计数；用来放自己家的中转机（realm）的出口 IP")
@@ -69,6 +70,9 @@ func main() {
 	// 目标地址过滤：默认只替客户端拨公网目标（内网/回环/链路本地/
 	// 云元数据地址一律拒绝，防 SSRF）；--allow-private 显式放开。
 	allowPrivate := flag.Bool("allow-private", false, "允许经代理访问内网/保留地址目标（默认只允许公网目标；没有内网服务要走代理时不要开）")
+	// 目标域名白名单：默认关；google = 只放行谷歌系域名（GCP 预设用，
+	// 保 GCP 每月 200 GiB 免费额度不被非谷歌流量吃掉）。
+	domainWhitelistStr := flag.String("domain-whitelist", "", "目标域名白名单：空（默认，关）或 google（只放行谷歌系域名，其他目标直接拒绝；IP 字面量目标只放行 Google 公共 DNS 8.8.8.8/8.8.4.4，其余拒绝）")
 	// 连接数上限：全局并发 + 单 IP 并发，防资源耗尽（默认 1024 / 64，
 	// 单用户正常用只有个位数连接，这两个数都很宽松）。
 	maxConns := flag.Int("max-conns", 1024, "全局最大并发连接数，超了静默丢弃")
@@ -103,6 +107,19 @@ func main() {
 	coverStr := flag.String("cover-traffic", "low", "掩护流量（v5 会话）：off（关）/ low（默认，空闲时平均约 45 秒一帧小记录）/ high（空闲时平均约 20 秒一帧）")
 	printPin := flag.Bool("print-pin", false, "打印 TLS 证书的 SPKI 指纹（base64url）并退出（mm 菜单查指纹用）")
 	flag.Parse()
+
+	domainWhitelist, err := mmx.ParseDomainWhitelist(*domainWhitelistStr)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	targetPolicy := mmx.TargetPolicy{AllowPrivate: *allowPrivate, DomainWhitelist: domainWhitelist}
+
+	// 谷歌 IP 段：白名单开着才加载。TUN 模式下域名先解析成 IP 再进代理，
+	// 服务端靠这张表认出谷歌 IP（否则 TUN + 谷歌白名单全断网）。
+	// 启动时先装内置快照，后台拉取在线列表并每 24h 刷新。
+	if domainWhitelist.Enabled() {
+		mmx.InitGoogleIPRanges()
+	}
 
 	if *fallback != "site" && *fallback != "silent" {
 		log.Fatalf("回退方式不合法：%q，应为 site（默认）或 silent", *fallback)
@@ -347,6 +364,9 @@ func main() {
 	if allowlist.Enabled() {
 		fmt.Printf("连接白名单（只允许这些 IP 连接）：%s\n", strings.Join(allowlistEntries, "、"))
 	}
+	if domainWhitelist.Enabled() {
+		fmt.Printf("目标域名白名单：只放行%s域名，其他目标直接拒绝\n", domainWhitelist.Label())
+	}
 	// 注意：启动时不打印节点链接和证书指纹——它们会进 systemd 日志，
 	// 日志一直留着，等于把密钥和指纹写进了磁盘。
 	// 要看链接用 --print-link（或 mm 菜单的 --show-link），
@@ -428,6 +448,12 @@ func main() {
 	// 缓存和限制器都在主循环外建好，随连接传进去。
 	replayCache := mmx.NewReplayCache(10 * time.Minute)
 	connLimiter := mmx.NewConnLimiter(*maxConns, *maxConnsPerIP)
+	// PSK 泄露检测：默认开启，同一密钥同时从两个 IP 使用就告警；
+	// --no-psk-leak-check 关掉它（传 nil，下游调用方做 nil 保护）。
+	var leakTracker *mmx.PSKLeakTracker
+	if !*noPSKLeakCheck {
+		leakTracker = mmx.NewPSKLeakTracker()
+	}
 	for {
 		raw, err := ln.Accept()
 		if err != nil {
@@ -442,7 +468,7 @@ func main() {
 			raw.Close()
 			continue
 		}
-		go handleConn(raw, km, serverRate, serverBurst, blocklist, allowlist, *fallback, tlsCfg, live, replayCache, connLimiter, *allowPrivate, tc)
+		go handleConn(raw, km, serverRate, serverBurst, blocklist, allowlist, *fallback, tlsCfg, live, replayCache, connLimiter, targetPolicy, tc, leakTracker)
 	}
 }
 
@@ -611,7 +637,7 @@ type peekConn struct {
 
 func (p *peekConn) Read(b []byte) (int, error) { return p.r.Read(b) }
 
-func handleConn(raw net.Conn, km *mmx.KeyManager, serverRate, serverBurst int64, bl *mmx.Blocklist, al *mmx.Allowlist, fallback string, tlsCfg *tls.Config, live *liveConns, replayCache *mmx.ReplayCache, connLimiter *mmx.ConnLimiter, allowPrivate bool, tc *mmx.TrafficCounter) {
+func handleConn(raw net.Conn, km *mmx.KeyManager, serverRate, serverBurst int64, bl *mmx.Blocklist, al *mmx.Allowlist, fallback string, tlsCfg *tls.Config, live *liveConns, replayCache *mmx.ReplayCache, connLimiter *mmx.ConnLimiter, policy mmx.TargetPolicy, tc *mmx.TrafficCounter, leakTracker *mmx.PSKLeakTracker) {
 	remote := raw.RemoteAddr().String()
 	defer raw.Close()
 	// 归还连接名额（accept 循环里占的）：无论哪条路返回都执行，
@@ -709,7 +735,7 @@ func handleConn(raw net.Conn, km *mmx.KeyManager, serverRate, serverBurst int64,
 	}
 	payload := rec[5:]
 	if mmx.LooksLikeMMXHandshake(payload, km.Keys()) != 0 {
-		serveMMX(pc, km, serverRate, serverBurst, bl, remote, ip, fallback, recordFail, live, replayCache, allowPrivate, tc)
+		serveMMX(pc, km, serverRate, serverBurst, bl, remote, ip, fallback, recordFail, live, replayCache, policy, tc, leakTracker)
 		return
 	}
 	if tlsCfg != nil && mmx.LooksLikeClientHello(payload) {
@@ -723,7 +749,7 @@ func handleConn(raw net.Conn, km *mmx.KeyManager, serverRate, serverBurst int64,
 			return // TLS 握手没完成：静默断开（crypto/tls 会按 TLS 规范回 alert，这是正常行为）
 		}
 		_ = tlsConn.SetDeadline(time.Time{})
-		serveInnerTLS(tlsConn, km, serverRate, serverBurst, bl, remote, ip, fallback, recordFail, live, replayCache, allowPrivate, tc)
+		serveInnerTLS(tlsConn, km, serverRate, serverBurst, bl, remote, ip, fallback, recordFail, live, replayCache, policy, tc, leakTracker)
 		return
 	}
 	// 既不是 mm-x 也不是 ClientHello：site 模式回一个像网站的 400 页
@@ -736,7 +762,7 @@ func handleConn(raw net.Conn, km *mmx.KeyManager, serverRate, serverBurst int64,
 
 // serveInnerTLS 处理 TLS 会话里面的内容：TLS 握手已完成，
 // 再看解密后的首字节是 mm-x 握手还是 HTTP（诱饵站）。
-func serveInnerTLS(tc *tls.Conn, km *mmx.KeyManager, serverRate, serverBurst int64, bl *mmx.Blocklist, remote, ip, fallback string, recordFail func(string), live *liveConns, replayCache *mmx.ReplayCache, allowPrivate bool, traf *mmx.TrafficCounter) {
+func serveInnerTLS(tc *tls.Conn, km *mmx.KeyManager, serverRate, serverBurst int64, bl *mmx.Blocklist, remote, ip, fallback string, recordFail func(string), live *liveConns, replayCache *mmx.ReplayCache, policy mmx.TargetPolicy, traf *mmx.TrafficCounter, leakTracker *mmx.PSKLeakTracker) {
 	defer tc.Close()
 	innerPC := &peekConn{Conn: tc, r: bufio.NewReaderSize(tc, 32768)}
 	_ = tc.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -766,14 +792,14 @@ func serveInnerTLS(tc *tls.Conn, km *mmx.KeyManager, serverRate, serverBurst int
 		recordFail("不是 mm-x 握手（TLS 内乱字节）")
 		return
 	}
-	serveMMX(innerPC, km, serverRate, serverBurst, bl, remote, ip, fallback, recordFail, live, replayCache, allowPrivate, traf)
+	serveMMX(innerPC, km, serverRate, serverBurst, bl, remote, ip, fallback, recordFail, live, replayCache, policy, traf, leakTracker)
 }
 
 // serveMMX 在一条已分流确认是 mm-x 的连接上做握手，
 // 按协商出的版本分流：v3 走复用会话，v2 走老 CONNECT 单连接。
 // 握手带重放防护（盐缓存 + 时间戳）：重放的握手在这里失败，
 // 不会走到后面的 RecordSuccess，攻击者 IP 不会被标成信任。
-func serveMMX(pc *peekConn, km *mmx.KeyManager, serverRate, serverBurst int64, bl *mmx.Blocklist, remote, ip, fallback string, recordFail func(string), live *liveConns, replayCache *mmx.ReplayCache, allowPrivate bool, tc *mmx.TrafficCounter) {
+func serveMMX(pc *peekConn, km *mmx.KeyManager, serverRate, serverBurst int64, bl *mmx.Blocklist, remote, ip, fallback string, recordFail func(string), live *liveConns, replayCache *mmx.ReplayCache, policy mmx.TargetPolicy, tc *mmx.TrafficCounter, leakTracker *mmx.PSKLeakTracker) {
 	keys, err := mmx.ServerHandshakeWithKeysAndReplay(pc, km.Keys(), replayCache)
 	if err != nil {
 		if fallback == "site" {
@@ -790,25 +816,30 @@ func serveMMX(pc *peekConn, km *mmx.KeyManager, serverRate, serverBurst int64, b
 		log.Printf("[%s] 建立加密连接失败：%v", remote, err)
 		return
 	}
+	// PSK 泄露检测：登记这条会话（同一密钥同时从两个 IP 在线就告警）。
+	// defer 覆盖 v2 和 v3/v4/v5 两条路——两条路都从 serveMMX 返回，
+	// 会话结束时计数必减回去（检测关了时 leakTracker 为 nil，Record/End 都是 no-op）。
+	leakTracker.Record(keys.PSK, ip)
+	defer leakTracker.End(keys.PSK, ip)
 	log.Printf("[%s] 握手成功（ver=%d）", remote, keys.Version)
 	if mmx.IsMuxVersion(keys.Version) {
 		// 登记这条 v3/v4/v5 会话和它用的密钥：旧密钥宽限期一到，
 		// 监视 goroutine 只断开用旧密钥建的会话。
 		live.add(pc, keys.PSK)
 		defer live.remove(pc)
-		if err := mmx.ServeMuxSession(mc, serverRate, serverBurst, remote, allowPrivate, mmx.SessionIdleTimeout, tc); err != nil {
+		if err := mmx.ServeMuxSession(mc, serverRate, serverBurst, remote, policy, mmx.SessionIdleTimeout, tc); err != nil {
 			log.Printf("[%s] v3/v4/v5 会话结束：%v", remote, err)
 		} else {
 			log.Printf("[%s] v3/v4/v5 会话结束", remote)
 		}
 		return
 	}
-	serveV2(mc, serverRate, serverBurst, remote, allowPrivate, tc)
+	serveV2(mc, serverRate, serverBurst, remote, policy, tc)
 }
 
 // serveV2 是 v2 的老流程：等 CONNECT 帧 → 拨目标 → 双向转发。
 // v3 不走这里（v3 没有 CONNECT 帧，流头在 yamux 流里）。
-func serveV2(mc *mmx.Conn, serverRate, serverBurst int64, remote string, allowPrivate bool, tc *mmx.TrafficCounter) {
+func serveV2(mc *mmx.Conn, serverRate, serverBurst int64, remote string, policy mmx.TargetPolicy, tc *mmx.TrafficCounter) {
 	// 等 CONNECT 帧
 	ftype, payload, err := mc.ReadFrame()
 	if err != nil {
@@ -840,7 +871,7 @@ func serveV2(mc *mmx.Conn, serverRate, serverBurst int64, remote string, allowPr
 	// 目标过滤：默认只拨公网目标（内网/回环/链路本地/云元数据拒绝，
 	// 防 SSRF）；--allow-private 时才放开。被拒绝时客户端收到的
 	// ACK 是 "[目标不允许] …"，和普通拨号失败区分开。
-	targetConn, err := mmx.DialTarget("tcp", target, 10*time.Second, allowPrivate)
+	targetConn, err := mmx.DialTarget("tcp", target, 10*time.Second, policy)
 	if err != nil {
 		// CONNECT 报错分类（ACK 文本带 "[错误码] …" 前缀，老客户端
 		// 按 string(payload[1:]) 读仍是可读中文，新客户端可解析错误码；

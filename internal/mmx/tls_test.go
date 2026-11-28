@@ -370,7 +370,7 @@ func TestResolveSNI(t *testing.T) {
 	}{
 		{&LinkConfig{SNI: "example.com", Host: "1.2.3.4"}, "example.com"}, // 链接里写了就用它
 		{&LinkConfig{Host: "example.com"}, "example.com"},                 // host 是域名就用 host
-		{&LinkConfig{Host: "47.238.255.159"}, DefaultSNI},                 // host 是 IP 就用默认常见域名
+		{&LinkConfig{Host: "203.0.113.5"}, DefaultSNI},                 // host 是 IP 就用默认常见域名
 		{&LinkConfig{Host: "localhost"}, "localhost"},                     // localhost 是域名
 		{&LinkConfig{}, DefaultSNI},                                       // 什么都没有就用默认
 	}
